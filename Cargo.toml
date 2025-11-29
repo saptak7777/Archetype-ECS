@@ -1,0 +1,42 @@
+[package]
+name = "aaa_ecs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Saptak Santra"]
+description = "AAA-level archetype-based ECS - Phase 1: Core Storage + Queries"
+license = "Apache-2.0"
+
+[dependencies]
+ahash = "0.8.12"
+# Phase 1 has zero dependencies (pure Rust std)
+# Future phases will add:
+# rayon = "1.8"       # Phase 4: Parallel scheduler
+# serde = "1.0"       # Phase 8: Serialization
+# tokio = "1.35"      # Phase 9: Async I/O
+rustc-hash = "1.1"
+slotmap = "1.0"
+smallvec = "1.13"
+tracing = { version = "0.1", optional = true }
+tracing-appender = { version = "0.2.4", optional = true }
+tracing-subscriber = { version = "0.3.20", features = ["json"], optional = true }
+
+[dev-dependencies]
+criterion = "0.5"  # Benchmarking
+hecs = "0.10"
+
+[features]
+default = []
+profiling = ["tracing", "tracing-appender", "tracing-subscriber"]
+
+[[bench]]
+name = "ecs_bench"
+harness = false
+
+[[example]]
+name = "basic"
+path = "example/basic.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
