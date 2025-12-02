@@ -1,4 +1,4 @@
-use aaa_ecs::{Children, GlobalTransform, LocalTransform, Vec3, World};
+use archetype_ecs::{Children, GlobalTransform, LocalTransform, Vec3, World};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn bench_flat_entities(c: &mut Criterion) {
@@ -67,13 +67,13 @@ fn bench_transform_operations(c: &mut Criterion) {
     c.bench_function("transform_local_to_global", |b| {
         let parent = GlobalTransform {
             position: Vec3::new(100.0, 200.0, 0.0),
-            rotation: aaa_ecs::Quat::identity(),
+            rotation: archetype_ecs::Quat::identity(),
             scale: Vec3::one(),
         };
 
         let child = LocalTransform {
             position: Vec3::new(10.0, 20.0, 0.0),
-            rotation: aaa_ecs::Quat::identity(),
+            rotation: archetype_ecs::Quat::identity(),
             scale: Vec3::one(),
         };
 

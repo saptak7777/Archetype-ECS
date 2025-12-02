@@ -1,4 +1,4 @@
-use aaa_ecs::{
+use archetype_ecs::{
     impl_reflect,
     query::{Added, CachedQuery, Changed, Read},
     reflection::{Reflect, TypeRegistry},

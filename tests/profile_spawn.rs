@@ -1,6 +1,6 @@
 #![cfg(feature = "profiling")]
 
-use aaa_ecs::World;
+use archetype_ecs::World;
 use std::{fs::File, time::Instant};
 
 #[derive(Debug, Clone)]

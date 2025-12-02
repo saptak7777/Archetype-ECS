@@ -1,4 +1,4 @@
-use aaa_ecs::World;
+use archetype_ecs::World;
 use std::{fs::File, time::Instant};
 
 #[derive(Debug, Clone)]
@@ -22,16 +22,24 @@ fn main() {
 
     // Run spawn benchmarks with tracing
     let mut world = World::new();
-    
+
     // Warm up
     for _ in 0..1000 {
-        world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0))).unwrap();
+        world
+            .spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)))
+            .unwrap();
     }
 
     // Profile spawn with 3 components
     let start = Instant::now();
     for i in 0..10_000 {
-        world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0), Health(100))).unwrap();
+        world
+            .spawn((
+                Position(1.0, 2.0, 3.0),
+                Velocity(1.0, 0.0, 0.0),
+                Health(100),
+            ))
+            .unwrap();
     }
     println!("Spawn 10k entities: {:?}", start.elapsed());
 }

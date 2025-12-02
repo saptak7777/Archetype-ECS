@@ -1,4 +1,4 @@
-use aaa_ecs::{DataResource, ResourceManager, TextureResource};
+use archetype_ecs::{DataResource, ResourceManager, TextureResource};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn create_test_resources(count: usize) -> Vec<DataResource> {

@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! AAA ECS - High-performance Entity Component System
+//! Archetype ECS - High-performance Entity Component System
 //!
-//! Production-ready ECS with parallel scheduler.
+//! Production-ready ECS with parallel scheduler and advanced features.
 
 pub mod app;
 pub mod archetype;

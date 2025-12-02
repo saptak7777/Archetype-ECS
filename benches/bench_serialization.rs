@@ -1,4 +1,4 @@
-use aaa_ecs::{EntityData, EntityIdData, WorldData};
+use archetype_ecs::{EntityData, EntityIdData, WorldData};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::collections::HashMap;
 

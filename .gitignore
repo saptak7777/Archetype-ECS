@@ -13,14 +13,47 @@ Cargo.lock
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # Profiling/Tracing
 trace.json
 *.trace
+*.prof
 
 # Benchmark results
 benchmark_results/
+criterion/
 
 # Temporary files
 *.tmp
 *.temp
+*.bak
+*.backup
+
+# Build artifacts
+*.pdb
+*.dll
+*.exe
+*.so
+*.dylib
+
+# Documentation
+/doc/
+/docs/
+
+# Test outputs
+test_results/
+*.out
+
+# Coverage reports
+tarpaulin-report.html
+cobertura.xml
+lcov.info
+
+# Rust analyzer
+.rust-analyzer/
+
+# Local configuration
+.env
+.env.local
+config.local.toml

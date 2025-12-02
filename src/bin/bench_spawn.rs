@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use aaa_ecs::World;
+use archetype_ecs::World;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]

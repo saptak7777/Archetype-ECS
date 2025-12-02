@@ -2,7 +2,7 @@
 //!
 //! The prelude can be imported with:
 //! ```
-//! use aaa_ecs::prelude::*;
+//! use archetype_ecs::prelude::*;
 //! ```
 
 pub use crate::app::App;

@@ -1,4 +1,4 @@
-use aaa_ecs::{EntityEvent, Observer, StatisticsObserver, World};
+use archetype_ecs::{EntityEvent, Observer, StatisticsObserver, World};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 #[derive(Clone, Copy, Debug)]
@@ -9,7 +9,7 @@ struct Position {
 
 struct NoOpObserver;
 impl Observer for NoOpObserver {
-    fn on_event(&mut self, _event: &EntityEvent, _world: &mut World) -> aaa_ecs::Result<()> {
+    fn on_event(&mut self, _event: &EntityEvent, _world: &mut World) -> archetype_ecs::Result<()> {
         Ok(())
     }
     fn name(&self) -> &str {

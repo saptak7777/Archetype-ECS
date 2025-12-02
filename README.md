@@ -1,4 +1,4 @@
-# AAA ECS
+# Archetype ECS
 
 A high-performance Entity Component System (ECS) written in Rust, designed for game development and performance-critical applications.
 
@@ -13,9 +13,9 @@ A high-performance Entity Component System (ECS) written in Rust, designed for g
 
 ## Performance
 
-AAA ECS demonstrates significant performance advantages over established libraries like hecs:
+Archetype ECS demonstrates significant performance advantages over established libraries like hecs:
 
-| Operation | AAA ECS | HECS | Improvement |
+| Operation | Archetype ECS | HECS | Improvement |
 |-----------|---------|------|-------------|
 | Entity Spawn (100k) | 2.84ms | 4.41ms | **35% faster** |
 | Entity Lookup (100k) | 197µs | 1.51ms | **7.6x faster** |
@@ -25,7 +25,7 @@ AAA ECS demonstrates significant performance advantages over established librari
 ## Quick Start
 
 ```rust
-use aaa_ecs::World;
+use archetype_ecs::World;
 
 #[derive(Debug, Clone)]
 struct Position { x: f32, y: f32 }
@@ -55,14 +55,14 @@ for (pos, vel) in world.query_mut::<(&mut Position, &mut Velocity)>().iter() {
 
 ## Architecture
 
-AAA ECS uses an archetype-based architecture where entities with the same component types are stored together in memory. This provides excellent cache locality during iteration and enables efficient query processing.
+Archetype ECS uses an archetype-based architecture where entities with the same component types are stored together in memory. This provides excellent cache locality during iteration and enables efficient query processing.
 
 ### QueryState Best Practices
 
 `QueryState` caches which archetypes satisfy a query. Create it once during system setup and reuse it each frame; rebuild only when the world's archetype layout changes (for example, when a new component combination is introduced). Reusing the cached state avoids repeatedly hashing archetype signatures and keeps query iteration fast.
 
 ```rust
-use aaa_ecs::{World, QueryState};
+use archetype_ecs::{World, QueryState};
 
 struct MovementSystem {
     state: QueryState<(&'static mut Position, &'static Velocity)>,

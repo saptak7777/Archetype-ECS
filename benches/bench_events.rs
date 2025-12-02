@@ -1,4 +1,4 @@
-use aaa_ecs::{Event, EventBus, EventSubscriber, Result};
+use archetype_ecs::{Event, EventBus, EventSubscriber, Result};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::any::{Any, TypeId};
 

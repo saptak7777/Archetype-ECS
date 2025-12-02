@@ -7,7 +7,7 @@
 //! # Examples
 //!
 //! ```
-//! use aaa_ecs::time::{Time, FixedTime};
+//! use archetype_ecs::time::{Time, FixedTime};
 //!
 //! let mut time = Time::new();
 //! let mut fixed = FixedTime::new(60); // 60 Hz

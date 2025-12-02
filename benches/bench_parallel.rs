@@ -1,4 +1,4 @@
-use aaa_ecs::{Executor, Schedule, System, SystemAccess, World};
+use archetype_ecs::{Executor, Schedule, System, SystemAccess, World};
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::any::TypeId;
 
@@ -20,7 +20,7 @@ impl System for HeavySystem {
         }
     }
 
-    fn run(&mut self, _world: &mut World) -> aaa_ecs::Result<()> {
+    fn run(&mut self, _world: &mut World) -> archetype_ecs::Result<()> {
         // Simulate work
         let mut _x = 0;
         for i in 0..1_000_000 {

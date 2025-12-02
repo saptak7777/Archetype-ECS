@@ -9,7 +9,7 @@
 //! - Entity lookup
 //! - Archetype operations
 
-use aaa_ecs::{QueryState, World as AaaWorld};
+use archetype_ecs::{QueryState, World as AaaWorld};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use hecs::World as HecsWorld;
 

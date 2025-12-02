@@ -5,7 +5,7 @@
 //! # Examples
 //!
 //! ```
-//! use aaa_ecs::builtin::{KeyboardInput, KeyCode};
+//! use archetype_ecs::builtin::{KeyboardInput, KeyCode};
 //!
 //! let mut input = KeyboardInput::new();
 //! input.press(KeyCode::Space);

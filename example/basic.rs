@@ -3,7 +3,7 @@
 //! Note: Full query iteration will be completed in Phase 2
 //! This example shows spawn/despawn and archetype storage
 
-use aaa_ecs::World;
+use archetype_ecs::World;
 
 // Define components
 #[allow(dead_code)]
@@ -83,7 +83,7 @@ fn main() {
 
     // Phase 2: Cached Query
     println!("\nPhase 2: Cached Query");
-    use aaa_ecs::query::CachedQuery;
+    use archetype_ecs::query::CachedQuery;
     let mut query = CachedQuery::<(&Position, &Velocity)>::new(&world);
 
     println!("Iterating query...");

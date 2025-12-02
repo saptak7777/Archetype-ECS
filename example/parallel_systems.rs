@@ -1,6 +1,6 @@
 //! Example: Parallel Systems with Phase 4 Scheduler
 
-use aaa_ecs::*;
+use archetype_ecs::*;
 
 // Components
 #[derive(Debug, Clone, Copy)]
@@ -92,13 +92,19 @@ fn main() -> Result<()> {
     let entity1 = world.spawn((
         Position { x: 0.0, y: 0.0 },
         Velocity { x: 1.0, y: 0.5 },
-        Health { current: 100, max: 100 },
+        Health {
+            current: 100,
+            max: 100,
+        },
     ))?;
 
     let entity2 = world.spawn((
         Position { x: 10.0, y: 5.0 },
         Velocity { x: -0.5, y: 1.0 },
-        Health { current: 75, max: 100 },
+        Health {
+            current: 75,
+            max: 100,
+        },
     ))?;
 
     println!("Spawned entities: {:?}, {:?}\n", entity1, entity2);

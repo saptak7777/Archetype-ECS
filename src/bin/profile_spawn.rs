@@ -1,6 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
-use aaa_ecs::World;
+use archetype_ecs::World;
 use std::{fs::File, time::Instant};
 
 #[derive(Debug, Clone)]

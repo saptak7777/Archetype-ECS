@@ -1,9 +1,9 @@
 [package]
-name = "aaa_ecs"
+name = "archetype_ecs"
 version = "0.1.0"
 edition = "2021"
 authors = ["Saptak Santra"]
-description = "AAA-level archetype-based ECS - Phase 1: Core Storage + Queries"
+description = "Archetype ECS - High-performance Entity Component System with parallel execution"
 license = "Apache-2.0"
 
 [dependencies]
