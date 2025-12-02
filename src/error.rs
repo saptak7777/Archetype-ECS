@@ -42,6 +42,33 @@ pub enum EcsError {
 
     /// System not found (Phase 4)
     SystemNotFound,
+
+    /// Event queue overflow (Phase 6)
+    EventQueueOverflow,
+
+    /// Serialization error (Phase 7)
+    SerializationError(String),
+
+    /// Deserialization error (Phase 7)
+    DeserializationError(String),
+
+    /// Resource not found (Phase 8)
+    ResourceNotFound(String),
+
+    /// Resource load error (Phase 8)
+    ResourceLoadError(String),
+
+    /// Resource memory overflow (Phase 8)
+    ResourceMemoryOverflow(String),
+
+    /// Resource deallocation error (Phase 8)
+    ResourceDeallocError(String),
+
+    /// Asset load error
+    AssetLoadError(String),
+
+    /// Asset not found
+    AssetNotFound(String),
 }
 
 impl fmt::Display for EcsError {
@@ -55,6 +82,15 @@ impl fmt::Display for EcsError {
             EcsError::SystemCycleDetected => write!(f, "System dependency cycle detected"),
             EcsError::ScheduleError(msg) => write!(f, "Schedule error: {msg}"),
             EcsError::SystemNotFound => write!(f, "System not found"),
+            EcsError::EventQueueOverflow => write!(f, "Event queue overflow"),
+            EcsError::SerializationError(msg) => write!(f, "Serialization error: {msg}"),
+            EcsError::DeserializationError(msg) => write!(f, "Deserialization error: {msg}"),
+            EcsError::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
+            EcsError::ResourceLoadError(msg) => write!(f, "Resource load error: {msg}"),
+            EcsError::ResourceMemoryOverflow(msg) => write!(f, "Resource memory overflow: {msg}"),
+            EcsError::ResourceDeallocError(msg) => write!(f, "Resource deallocation error: {msg}"),
+            EcsError::AssetLoadError(msg) => write!(f, "Asset load error: {msg}"),
+            EcsError::AssetNotFound(msg) => write!(f, "Asset not found: {msg}"),
         }
     }
 }

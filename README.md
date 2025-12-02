@@ -57,6 +57,33 @@ for (pos, vel) in world.query_mut::<(&mut Position, &mut Velocity)>().iter() {
 
 AAA ECS uses an archetype-based architecture where entities with the same component types are stored together in memory. This provides excellent cache locality during iteration and enables efficient query processing.
 
+### QueryState Best Practices
+
+`QueryState` caches which archetypes satisfy a query. Create it once during system setup and reuse it each frame; rebuild only when the world's archetype layout changes (for example, when a new component combination is introduced). Reusing the cached state avoids repeatedly hashing archetype signatures and keeps query iteration fast.
+
+```rust
+use aaa_ecs::{World, QueryState};
+
+struct MovementSystem {
+    state: QueryState<(&'static mut Position, &'static Velocity)>,
+}
+
+impl MovementSystem {
+    fn new(world: &World) -> Self {
+        Self {
+            state: QueryState::new(world),
+        }
+    }
+
+    fn run(&mut self, world: &mut World) {
+        for (pos, vel) in self.state.iter_mut(world) {
+            pos.x += vel.x;
+            pos.y += vel.y;
+        }
+    }
+}
+```
+
 ### Key Components
 
 - **World**: Central storage for entities and archetypes

@@ -17,7 +17,11 @@
 #[cfg(test)]
 mod tests {
     #![allow(dead_code)]
-    use crate::{CommandBuffer, Query, QueryState, World};
+    use crate::{
+        CommandBuffer, Executor, Query, QueryState, Schedule, System, SystemAccess, World,
+    };
+    use crate::{EcsError, Result};
+    use std::any::TypeId;
 
     #[test]
     fn test_basic_spawn_despawn() {
@@ -436,5 +440,102 @@ mod tests {
             assert!(pos.0 >= 1.0);
             assert!(vel.0 >= 2.0);
         }
+    }
+
+    #[derive(Debug, Default, Clone)]
+    struct LogComponent {
+        entries: Vec<&'static str>,
+    }
+
+    struct LoggingSystem {
+        name: &'static str,
+    }
+
+    impl System for LoggingSystem {
+        fn access(&self) -> SystemAccess {
+            let mut access = SystemAccess::empty();
+            access.writes.push(TypeId::of::<LogComponent>());
+            access
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn run(&mut self, world: &mut World) -> Result<()> {
+            let mut query = world.query_mut::<&mut LogComponent>();
+            for log in query.iter() {
+                log.entries.push(self.name);
+            }
+            Ok(())
+        }
+    }
+
+    struct FailingSystem;
+
+    impl System for FailingSystem {
+        fn access(&self) -> SystemAccess {
+            SystemAccess::empty()
+        }
+
+        fn name(&self) -> &'static str {
+            "failing_system"
+        }
+
+        fn run(&mut self, _world: &mut World) -> Result<()> {
+            Err(EcsError::ScheduleError("intentional failure".into()))
+        }
+    }
+
+    #[test]
+    fn test_executor_runs_systems_in_order() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((LogComponent::default(),))
+            .expect("spawn log entity");
+
+        let schedule = Schedule::new()
+            .with_system(Box::new(LoggingSystem { name: "first" }))
+            .with_system(Box::new(LoggingSystem { name: "second" }))
+            .build()
+            .expect("build schedule");
+
+        let mut executor = Executor::new(schedule);
+        executor
+            .execute_frame(&mut world)
+            .expect("executor should run");
+
+        let log = world
+            .get_component::<LogComponent>(entity)
+            .expect("log component exists");
+        assert_eq!(log.entries, vec!["first", "second"]);
+
+        let profile = executor.profile().expect("profiling data available");
+        assert_eq!(profile.system_timings.len(), 2);
+        assert_eq!(profile.system_timings[0].name, "first");
+    }
+
+    #[test]
+    fn test_executor_propagates_errors_and_stops() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((LogComponent::default(),))
+            .expect("spawn log entity");
+
+        let schedule = Schedule::new()
+            .with_system(Box::new(LoggingSystem { name: "first" }))
+            .with_system(Box::new(FailingSystem))
+            .with_system(Box::new(LoggingSystem { name: "second" }))
+            .build()
+            .expect("build schedule");
+
+        let mut executor = Executor::new(schedule);
+        let result = executor.execute_frame(&mut world);
+        assert!(result.is_err(), "executor should propagate system error");
+
+        let log = world
+            .get_component::<LogComponent>(entity)
+            .expect("log component exists");
+        assert_eq!(log.entries, vec!["first"]);
     }
 }

@@ -103,18 +103,13 @@ fn main() -> Result<()> {
 
     println!("Spawned entities: {:?}, {:?}\n", entity1, entity2);
 
-    // Create systems
-    let systems: Vec<BoxedSystem> = vec![
-        Box::new(MovementSystem),
-        Box::new(HealthSystem),
-        Box::new(RenderSystem),
-    ];
+    // Create schedule and add systems
+    let schedule = Schedule::new()
+        .with_system(Box::new(MovementSystem))
+        .with_system(Box::new(HealthSystem))
+        .with_system(Box::new(RenderSystem))
+        .build()?;
 
-    println!("Building schedule from {} systems...", systems.len());
-
-    // Build schedule
-    let schedule = Schedule::build(systems)?;
-    
     println!("Schedule built successfully!");
     println!("  Stages: {}", schedule.stage_count());
     for (i, stage) in schedule.stages.iter().enumerate() {

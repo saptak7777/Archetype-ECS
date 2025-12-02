@@ -34,7 +34,7 @@ fn main() {
         .spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.5 }))
         .expect("spawn entity1");
 
-    println!("Spawned entity {:?}", entity1);
+    println!("Spawned entity {entity1:?}");
 
     // Spawn entity with all three components
     let entity2 = world
@@ -45,14 +45,14 @@ fn main() {
         ))
         .expect("spawn entity2");
 
-    println!("Spawned entity {:?}", entity2);
+    println!("Spawned entity {entity2:?}");
 
     // Spawn entity with only Position
     let entity3 = world
         .spawn((Position { x: 5.0, y: 5.0 },))
         .expect("spawn entity3");
 
-    println!("Spawned entity {:?}", entity3);
+    println!("Spawned entity {entity3:?}");
 
     // Check entity locations
     if let Some(loc) = world.get_entity_location(entity1) {
@@ -64,11 +64,11 @@ fn main() {
 
     // Despawn entity
     world.despawn(entity2).expect("despawn entity2");
-    println!("Despawned entity {:?}", entity2);
+    println!("Despawned entity {entity2:?}");
 
     // Try to get despawned entity (should fail)
     if world.get_entity_location(entity2).is_none() {
-        println!("Entity {:?} no longer exists", entity2);
+        println!("Entity {entity2:?} no longer exists");
     }
 
     println!("\nArchetype summary:");
@@ -81,5 +81,18 @@ fn main() {
         );
     }
 
-    println!("\nPhase 1 complete! Phase 2 will add query iteration.");
+    // Phase 2: Cached Query
+    println!("\nPhase 2: Cached Query");
+    use aaa_ecs::query::CachedQuery;
+    let mut query = CachedQuery::<(&Position, &Velocity)>::new(&world);
+
+    println!("Iterating query...");
+    for (pos, vel) in query.iter(&world) {
+        println!(
+            "  Entity at ({}, {}) with velocity ({}, {})",
+            pos.x, pos.y, vel.x, vel.y
+        );
+    }
+
+    println!("\nPhase 1 & 2 complete!");
 }

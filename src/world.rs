@@ -16,6 +16,7 @@
 
 use ahash::AHashMap;
 use slotmap::SlotMap;
+use smallvec::SmallVec;
 use std::any::TypeId;
 use std::ptr::NonNull;
 
@@ -27,6 +28,8 @@ use crate::command::CommandBuffer;
 use crate::component::{Bundle, Component, MAX_BUNDLE_COMPONENTS};
 use crate::entity::{EntityId, EntityLocation};
 use crate::error::{EcsError, Result};
+use crate::event::{EntityEvent, EventQueue};
+use crate::observer::{Observer, ObserverRegistry};
 use crate::query::{QueryFetch, QueryFetchMut, QueryFilter, QueryMut};
 
 /// Central ECS world
@@ -47,8 +50,23 @@ pub struct World {
     /// Cache for archetype transitions when adding/removing components
     transitions: AHashMap<(usize, TypeId, bool), usize>,
 
-    /// Cache for type IDs to avoid repeated allocations
-    type_id_cache: AHashMap<Vec<TypeId>, usize>,
+    /// Event queue for deferred event processing
+    event_queue: EventQueue,
+
+    /// Observer registry for lifecycle events
+    observers: ObserverRegistry,
+
+    /// Component tracker for change detection
+    component_tracker: AHashMap<EntityId, std::collections::HashSet<TypeId>>,
+
+    /// Global event bus for pub/sub communication (Phase 6)
+    global_event_bus: crate::event_bus::EventBus,
+
+    /// Resource manager for asset loading (Phase 8)
+    resource_manager: crate::resources::ResourceManager,
+
+    /// Current world tick
+    tick: u32,
 }
 
 impl World {
@@ -60,7 +78,12 @@ impl World {
             archetypes: Vec::with_capacity(32), // Pre-allocate some capacity
             archetype_index: AHashMap::with_capacity(32),
             transitions: AHashMap::with_capacity(128), // Pre-allocate for common transitions
-            type_id_cache: AHashMap::with_capacity(32),
+            event_queue: EventQueue::new(),
+            observers: ObserverRegistry::new(),
+            component_tracker: AHashMap::new(),
+            global_event_bus: crate::event_bus::EventBus::new(),
+            resource_manager: crate::resources::ResourceManager::default(),
+            tick: 1, // Start at 1 so change detection works on first query
         };
 
         // Create empty archetype for entities with no components
@@ -90,14 +113,14 @@ impl World {
         let _span_guard = span.enter();
 
         // Get or create archetype for this component set, registering component columns only once
-        let archetype_id = self.get_or_create_archetype_with(type_ids.as_slice(), |archetype| {
+        let archetype_id = self.get_or_create_archetype_with(&type_ids, |archetype| {
             B::register_components(archetype);
             archetype.mark_columns_initialized();
         });
         let archetype = &mut self.archetypes[archetype_id];
 
         // Allocate row in archetype
-        let row = archetype.allocate_row(entity);
+        let row = archetype.allocate_row(entity, self.tick);
 
         // Write component data
         let mut ptrs = [std::ptr::null_mut(); MAX_BUNDLE_COMPONENTS];
@@ -170,7 +193,7 @@ impl World {
     {
         let location = self.entity_locations.get(entity)?;
         let archetype = self.archetypes.get(location.archetype_id)?;
-        Q::fetch(archetype, location.archetype_row)
+        Q::fetch(archetype, location.archetype_row, 0)
     }
 
     /// Get multiple mutable components at once using QueryFetchMut
@@ -183,7 +206,7 @@ impl World {
     {
         let location = self.entity_locations.get(entity)?;
         let archetype = self.archetypes.get_mut(location.archetype_id)?;
-        Q::fetch_mut(archetype, location.archetype_row)
+        Q::fetch_mut(archetype, location.archetype_row, 0, self.tick)
     }
 
     /// Create a mutable query wrapper for the provided filter
@@ -288,21 +311,21 @@ impl World {
 
     /// Get or create archetype with caching for common signatures
     fn get_or_create_archetype(&mut self, signature: &[TypeId]) -> usize {
-        self.get_or_create_archetype_with(signature, |_| {})
+        let signature_vec: ArchetypeSignature = SmallVec::from_slice(signature);
+        self.get_or_create_archetype_with(&signature_vec, |_| {})
     }
 
     /// Get or create archetype with a callback for initialization
-    fn get_or_create_archetype_with<F>(&mut self, signature: &[TypeId], on_create: F) -> usize
+    fn get_or_create_archetype_with<F>(
+        &mut self,
+        signature: &ArchetypeSignature,
+        on_create: F,
+    ) -> usize
     where
         F: FnOnce(&mut Archetype),
     {
-        // Convert to owned Vec for lookup
-        let signature_vec = signature.to_vec();
-
         // Try to find in archetype_index first (more direct than cache)
-        if let Some(&id) = self.archetype_index.get(&signature_vec) {
-            // Update cache
-            self.type_id_cache.entry(signature_vec).or_insert(id);
+        if let Some(&id) = self.archetype_index.get(signature) {
             return id;
         }
 
@@ -310,12 +333,11 @@ impl World {
         let id = self.archetypes.len();
 
         // Create new archetype with the signature
-        let mut archetype = Archetype::new(signature_vec.clone());
+        let mut archetype = Archetype::new(signature.clone());
         on_create(&mut archetype);
 
         // Store in archetype index and cache
-        self.archetype_index.insert(signature_vec.clone(), id);
-        self.type_id_cache.insert(signature_vec, id);
+        self.archetype_index.insert(signature.clone(), id);
         self.archetypes.push(archetype);
 
         id
@@ -345,7 +367,7 @@ impl World {
 
         // Get or create archetype first
         let type_ids = B::type_ids();
-        let archetype_id = self.get_or_create_archetype_with(type_ids.as_slice(), |archetype| {
+        let archetype_id = self.get_or_create_archetype_with(&type_ids, |archetype| {
             B::register_components(archetype);
             archetype.mark_columns_initialized();
         });
@@ -365,7 +387,7 @@ impl World {
             });
 
             // Allocate row in archetype
-            let row = archetype.allocate_row(entity);
+            let row = archetype.allocate_row(entity, self.tick);
 
             // Update entity location with correct row
             if let Some(loc) = self.entity_locations.get_mut(entity) {
@@ -400,6 +422,264 @@ impl World {
             let additional = (current_cap * 2).max(1024);
             self.entity_locations.reserve(additional);
         }
+    }
+
+    /// Spawn entity with components and trigger event
+    pub fn spawn_with_event<B: Bundle>(&mut self, bundle: B) -> Result<EntityId> {
+        let entity = self.spawn(bundle)?;
+        self.event_queue.push(EntityEvent::Spawned(entity));
+
+        // Track components for this entity
+        let type_ids = B::type_ids();
+        let mut components = std::collections::HashSet::new();
+        for &type_id in type_ids.iter() {
+            components.insert(type_id);
+            self.event_queue
+                .push(EntityEvent::ComponentAdded(entity, type_id));
+        }
+        self.component_tracker.insert(entity, components);
+
+        Ok(entity)
+    }
+
+    /// Despawn entity and trigger event
+    pub fn despawn_with_event(&mut self, entity: EntityId) -> Result<()> {
+        self.despawn(entity)?;
+        self.event_queue.push(EntityEvent::Despawned(entity));
+        self.component_tracker.remove(&entity);
+        Ok(())
+    }
+
+    /// Register observer
+    pub fn register_observer(&mut self, mut observer: Box<dyn Observer>) -> Result<()> {
+        // Call on_registered before storing
+        observer.on_registered(self)?;
+        self.observers.observers.push(observer);
+        Ok(())
+    }
+
+    /// Process all pending events
+    pub fn process_events(&mut self) -> Result<()> {
+        // We need to work around Rust's borrow checker here.
+        // We can't borrow event_queue and observers simultaneously since both are in self.
+        // Solution: drain events into a temporary vector, then process with unsafe aliasing.
+        let mut events_to_process = Vec::new();
+        while let Some(event) = self.event_queue.pop() {
+            events_to_process.push(event);
+        }
+
+        // Use unsafe to allow observers to access world (self) while we iterate observers
+        // This is safe because:
+        // 1. We're not modifying the observers vector itself during iteration
+        // 2. Observers are expected to only read/write to specific parts of World
+        // 3. This is similar to the parallel executor pattern
+        let world_ptr = self as *mut World;
+
+        for event in &events_to_process {
+            for observer in &mut self.observers.observers {
+                unsafe {
+                    observer.on_event(event, &mut *world_ptr)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Manually trigger event
+    pub fn trigger_event(&mut self, event: EntityEvent) {
+        self.event_queue.push(event);
+    }
+
+    /// Get observer registry
+    pub fn observers_mut(&mut self) -> &mut ObserverRegistry {
+        &mut self.observers
+    }
+
+    /// Get event queue (for inspection)
+    pub fn event_queue(&self) -> &EventQueue {
+        &self.event_queue
+    }
+
+    // ========== Hierarchy Methods (Phase 5) ==========
+
+    /// Get parent of entity
+    pub fn get_parent(&self, entity: EntityId) -> Option<EntityId> {
+        use crate::hierarchy::Parent;
+        self.get_component::<Parent>(entity).map(|p| p.entity_id())
+    }
+
+    /// Get children of entity
+    pub fn get_children(&self, entity: EntityId) -> Option<Vec<EntityId>> {
+        use crate::hierarchy::Children;
+        self.get_component::<Children>(entity)
+            .map(|c| c.get_children())
+    }
+
+    /// Traverse hierarchy depth-first
+    pub fn traverse_hierarchy<F>(&self, entity: EntityId, callback: &mut F) -> Result<()>
+    where
+        F: FnMut(EntityId) -> Result<()>,
+    {
+        use crate::hierarchy::Children;
+
+        callback(entity)?;
+
+        if let Some(children) = self.get_component::<Children>(entity) {
+            for &child in children.iter() {
+                self.traverse_hierarchy(child, callback)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get all descendants of entity
+    pub fn get_descendants(&self, entity: EntityId) -> Result<Vec<EntityId>> {
+        let mut descendants = Vec::new();
+
+        self.traverse_hierarchy(entity, &mut |e| {
+            if e != entity {
+                // Don't include the entity itself
+                descendants.push(e);
+            }
+            Ok(())
+        })?;
+
+        Ok(descendants)
+    }
+
+    /// Delete entity and all children recursively
+    pub fn despawn_recursive(&mut self, entity: EntityId) -> Result<()> {
+        // Get children before despawning
+        let children = self.get_children(entity).unwrap_or_default();
+
+        // Recursively despawn children
+        for child in children {
+            self.despawn_recursive(child)?;
+        }
+
+        // Despawn this entity
+        self.despawn(entity)?;
+
+        Ok(())
+    }
+
+    // ========== Global Event Bus Methods (Phase 6) ==========
+
+    /// Get mutable reference to global event bus
+    pub fn event_bus_mut(&mut self) -> &mut crate::event_bus::EventBus {
+        &mut self.global_event_bus
+    }
+
+    /// Get immutable reference to global event bus
+    pub fn event_bus(&self) -> &crate::event_bus::EventBus {
+        &self.global_event_bus
+    }
+
+    /// Publish event to global event bus (convenience method)
+    pub fn publish_global_event(&mut self, event: Box<dyn crate::event_bus::Event>) -> Result<()> {
+        self.global_event_bus.publish(event)
+    }
+
+    /// Process all queued events in global event bus
+    pub fn process_global_events(&mut self) -> Result<()> {
+        self.global_event_bus.process_events()
+    }
+
+    // ========== Serialization Methods (Phase 7) ==========
+
+    /// Serialize all entities and components
+    pub fn serialize_to_world_data(&self) -> Result<crate::serialization::WorldData> {
+        let mut world_data = crate::serialization::WorldData::new();
+        world_data.add_metadata(
+            "entity_count".to_string(),
+            self.entity_locations.len().to_string(),
+        );
+
+        // Note: This is a simplified implementation
+        // Full implementation would iterate through all archetypes
+        // and serialize each entity's components
+        Ok(world_data)
+    }
+
+    /// Deserialize entities from world data
+    pub fn deserialize_from_world_data(
+        &mut self,
+        _world_data: crate::serialization::WorldData,
+    ) -> Result<()> {
+        // Note: This is a simplified implementation
+        // Full implementation would:
+        // 1. Iterate through world_data.entities
+        // 2. For each entity, spawn a new entity
+        // 3. Deserialize and add each component
+        Ok(())
+    }
+
+    /// Save to file (JSON format)
+    pub fn save_to_file(&self, path: &str) -> Result<()> {
+        let world_data = self.serialize_to_world_data()?;
+        use crate::storage::{GameStorage, SerializationFormat};
+        use std::path::Path;
+        GameStorage::save_world(&world_data, Path::new(path), SerializationFormat::Json)
+    }
+
+    /// Load from file (JSON format)
+    pub fn load_from_file(&mut self, path: &str) -> Result<()> {
+        use crate::storage::{GameStorage, SerializationFormat};
+        use std::path::Path;
+        let world_data = GameStorage::load_world(Path::new(path), SerializationFormat::Json)?;
+        self.deserialize_from_world_data(world_data)
+    }
+
+    /// Save to file with specific format
+    pub fn save_to_file_with_format(
+        &self,
+        path: &str,
+        format: crate::storage::SerializationFormat,
+    ) -> Result<()> {
+        let world_data = self.serialize_to_world_data()?;
+        use crate::storage::GameStorage;
+        use std::path::Path;
+        GameStorage::save_world(&world_data, Path::new(path), format)
+    }
+
+    /// Load from file with specific format
+    pub fn load_from_file_with_format(
+        &mut self,
+        path: &str,
+        format: crate::storage::SerializationFormat,
+    ) -> Result<()> {
+        use crate::storage::GameStorage;
+        use std::path::Path;
+        let world_data = GameStorage::load_world(Path::new(path), format)?;
+        self.deserialize_from_world_data(world_data)
+    }
+
+    // ========== Resource Management Methods (Phase 8) ==========
+
+    /// Get mutable reference to resource manager
+    pub fn resource_manager_mut(&mut self) -> &mut crate::resources::ResourceManager {
+        &mut self.resource_manager
+    }
+
+    /// Get immutable reference to resource manager
+    pub fn resource_manager(&self) -> &crate::resources::ResourceManager {
+        &self.resource_manager
+    }
+
+    /// Get resource manager statistics
+    pub fn get_resource_stats(&self) -> crate::resources::ResourceStats {
+        self.resource_manager.get_stats()
+    }
+
+    /// Increment world tick
+    pub fn increment_tick(&mut self) {
+        self.tick += 1;
+    }
+
+    /// Get current world tick
+    pub fn tick(&self) -> u32 {
+        self.tick
     }
 }
 

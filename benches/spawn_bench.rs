@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use aaa_ecs::World;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 

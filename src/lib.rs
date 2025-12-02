@@ -16,36 +16,69 @@
 //!
 //! Production-ready ECS with parallel scheduler.
 
+pub mod app;
 pub mod archetype;
+pub mod assets;
+pub mod builtin;
 pub mod command;
 pub mod component;
+pub mod debug;
+pub mod dependency;
 pub mod entity;
 pub mod error;
-pub mod query;
-pub mod utils;
-pub mod world;
-
-// Phase 4: Parallel Scheduler
+pub mod event;
+pub mod event_bus;
+pub mod event_subscriber;
+pub mod event_types;
 pub mod executor;
+pub mod hierarchy;
+pub mod hierarchy_system;
+pub mod observer;
+pub mod parallel;
+pub mod plugin;
+pub mod prelude;
+pub mod query;
+pub mod reflection;
+pub mod resources;
 pub mod schedule;
+pub mod serializable;
+pub mod serialization;
+pub mod storage;
 pub mod system;
-
-// Re-exports for convenience
-pub use archetype::Archetype;
-pub use command::CommandBuffer;
-pub use component::{Bundle, Component};
-pub use entity::EntityId;
-pub use error::{EcsError, Result};
-pub use query::{Query, QueryFetchMut, QueryFilter, QueryMut, QueryState};
-pub use world::World;
-
-// Phase 4 exports
-pub use executor::{Executor, SystemProfiler};
-pub use schedule::{Schedule, Stage, SystemGraph};
-pub use system::{BoxedSystem, System, SystemAccess, SystemId};
+pub mod time;
+pub mod transform;
+pub mod world;
 
 #[cfg(test)]
 mod tests;
+
+pub use app::*;
+pub use archetype::*;
+pub use command::*;
+pub use component::*;
+pub use dependency::*;
+pub use entity::*;
+pub use error::*;
+pub use event::*;
+pub use event_bus::*;
+pub use event_subscriber::*;
+pub use event_types::*;
+pub use executor::*;
+pub use hierarchy::*;
+pub use hierarchy_system::*;
+pub use observer::*;
+pub use parallel::*;
+pub use plugin::*;
+pub use query::*;
+pub use reflection::*;
+pub use resources::*;
+pub use schedule::*;
+pub use serializable::*;
+pub use serialization::*;
+pub use storage::*;
+pub use system::*;
+pub use transform::*;
+pub use world::*;
 
 #[cfg(all(test, not(target_env = "msvc")))]
 mod ecs_bench;

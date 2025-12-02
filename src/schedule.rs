@@ -5,7 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::error::{EcsError, Result};
-use crate::system::{BoxedSystem, SystemAccess, SystemId};
+use crate::system::{BoxedSystem, System, SystemAccess, SystemId};
 
 /// System node in dependency graph
 #[derive(Debug, Clone)]
@@ -144,15 +144,78 @@ impl Default for Stage {
 
 /// Complete execution schedule
 pub struct Schedule {
-    pub graph: SystemGraph,
-    pub stages: Vec<Stage>,
-    pub systems: Vec<BoxedSystem>,
+    pub(crate) systems: Vec<BoxedSystem>,
+    pub(crate) stages: Vec<Stage>,
+    pub(crate) graph: Option<SystemGraph>,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Schedule {
-    /// Build schedule from systems
-    pub fn build(systems: Vec<BoxedSystem>) -> Result<Self> {
-        let graph = SystemGraph::build(&systems);
+    /// Build a schedule directly from a vector of systems
+    pub fn from_systems(systems: Vec<BoxedSystem>) -> Result<Self> {
+        Self {
+            systems,
+            stages: Vec::new(),
+            graph: None,
+        }
+        .build()
+    }
+
+    /// Create an empty schedule
+    pub fn new() -> Self {
+        Self {
+            systems: Vec::new(),
+            stages: Vec::new(),
+            graph: None,
+        }
+    }
+
+    /// Convenience constructor for chaining
+    pub fn with_system(mut self, system: BoxedSystem) -> Self {
+        self.add_system(system);
+        self
+    }
+
+    /// Add a system to the schedule definition
+    pub fn add_system(&mut self, system: BoxedSystem) {
+        self.systems.push(system);
+        self.invalidate();
+    }
+
+    fn invalidate(&mut self) {
+        self.graph = None;
+        self.stages.clear();
+    }
+
+    /// Get mutable reference to a system by name
+    pub fn get_system_mut(&mut self, name: &str) -> Option<&mut (dyn System + 'static)> {
+        self.systems
+            .iter_mut()
+            .find(|sys| sys.name() == name)
+            .map(|sys| sys.as_mut())
+    }
+
+    /// Finalize schedule (topological sort + stage grouping)
+    pub fn build(mut self) -> Result<Self> {
+        self.rebuild()?;
+        Ok(self)
+    }
+
+    /// Ensure schedule is built (used internally by executor)
+    pub(crate) fn ensure_built(&mut self) -> Result<()> {
+        if self.graph.is_none() {
+            self.rebuild()?;
+        }
+        Ok(())
+    }
+
+    fn rebuild(&mut self) -> Result<()> {
+        let graph = SystemGraph::build(&self.systems);
         let sorted = graph.topological_sort()?;
 
         // Group into stages (greedy)
@@ -163,7 +226,6 @@ impl Schedule {
             let node = graph.nodes.iter().find(|n| n.id == system_id).unwrap();
 
             if !current_stage.try_add(system_id, &node.access, &graph) {
-                // Start new stage
                 if !current_stage.systems.is_empty() {
                     stages.push(current_stage);
                     current_stage = Stage::new();
@@ -176,11 +238,9 @@ impl Schedule {
             stages.push(current_stage);
         }
 
-        Ok(Self {
-            graph,
-            stages,
-            systems,
-        })
+        self.graph = Some(graph);
+        self.stages = stages;
+        Ok(())
     }
 
     /// Get stage count
@@ -191,6 +251,39 @@ impl Schedule {
     /// Get systems in stage
     pub fn stage_system_count(&self, stage_idx: usize) -> usize {
         self.stages.get(stage_idx).map_or(0, |s| s.systems.len())
+    }
+
+    /// Total number of registered systems
+    pub fn system_count(&self) -> usize {
+        self.systems.len()
+    }
+
+    pub(crate) fn system_mut_by_id(&mut self, id: SystemId) -> Option<&mut BoxedSystem> {
+        self.systems.get_mut(id.0 as usize)
+    }
+
+    pub(crate) fn stage_plan(&self) -> Vec<Vec<SystemId>> {
+        self.stages
+            .iter()
+            .map(|stage| stage.systems.clone())
+            .collect()
+    }
+
+    /// Get system accesses for dependency analysis
+    pub fn get_accesses(&self) -> Vec<SystemAccess> {
+        self.systems.iter().map(|s| s.access()).collect()
+    }
+
+    /// Build parallel execution stages
+    pub fn analyze_parallelization(&self) -> crate::dependency::DependencyGraph {
+        use crate::dependency::DependencyGraph;
+        DependencyGraph::new(self.get_accesses())
+    }
+
+    /// Print execution plan
+    pub fn print_execution_plan(&self) {
+        let graph = self.analyze_parallelization();
+        graph.print_schedule();
     }
 }
 

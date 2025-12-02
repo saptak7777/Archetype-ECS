@@ -5,24 +5,25 @@
 // executor.rs
 // ============================================================================
 
-use crate::error::Result;
+use crate::error::{EcsError, Result};
 use crate::schedule::Schedule;
-use crate::system::SystemId;
+use crate::system::{System, SystemId};
 use crate::World;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// System execution profiler
 #[derive(Debug, Clone)]
 pub struct SystemStats {
-    pub min: std::time::Duration,
-    pub max: std::time::Duration,
-    pub avg: std::time::Duration,
+    pub min: Duration,
+    pub max: Duration,
+    pub avg: Duration,
     pub call_count: u64,
 }
 
 /// System profiler for collecting timing data
 pub struct SystemProfiler {
-    timings: HashMap<SystemId, Vec<std::time::Duration>>,
+    timings: HashMap<SystemId, Vec<Duration>>,
     call_counts: HashMap<SystemId, u64>,
 }
 
@@ -34,7 +35,7 @@ impl SystemProfiler {
         }
     }
 
-    pub fn record_execution(&mut self, id: SystemId, duration: std::time::Duration) {
+    pub fn record_execution(&mut self, id: SystemId, duration: Duration) {
         self.timings.entry(id).or_default().push(duration);
         self.call_counts
             .entry(id)
@@ -48,9 +49,9 @@ impl SystemProfiler {
             return None;
         }
 
-        let min = *timings.iter().min().unwrap_or(&std::time::Duration::ZERO);
-        let max = *timings.iter().max().unwrap_or(&std::time::Duration::ZERO);
-        let avg = timings.iter().sum::<std::time::Duration>() / timings.len() as u32;
+        let min = *timings.iter().min().unwrap_or(&Duration::ZERO);
+        let max = *timings.iter().max().unwrap_or(&Duration::ZERO);
+        let avg = timings.iter().sum::<Duration>() / timings.len() as u32;
 
         Some(SystemStats {
             min,
@@ -72,10 +73,25 @@ impl Default for SystemProfiler {
     }
 }
 
+/// Per-system timing data for a single frame
+#[derive(Debug, Clone)]
+pub struct SystemTiming {
+    pub name: String,
+    pub duration: Duration,
+}
+
+/// Execution profile for a frame
+#[derive(Debug, Clone)]
+pub struct ExecutionProfile {
+    pub total_frame_time: Duration,
+    pub system_timings: Vec<SystemTiming>,
+}
+
 /// Frame executor
 pub struct Executor {
     pub schedule: Schedule,
     pub profiler: SystemProfiler,
+    last_profile: Option<ExecutionProfile>,
 }
 
 impl Executor {
@@ -84,25 +100,199 @@ impl Executor {
         Self {
             schedule,
             profiler: SystemProfiler::new(),
+            last_profile: None,
         }
     }
 
     /// Execute one frame
     pub fn execute_frame(&mut self, world: &mut World) -> Result<()> {
-        // FIXED: Clone stages to avoid borrow conflict
-        let stage_count = self.schedule.stages.len();
+        self.schedule.ensure_built()?;
+        let stage_plan = self.schedule.stage_plan();
+        let frame_start = Instant::now();
+        let mut system_timings = Vec::new();
 
-        for stage_idx in 0..stage_count {
-            // Execute systems in stage
-            for &_system_id in &self.schedule.stages[stage_idx].systems {
-                // In Phase 4, we store system references
-                // Full implementation in actual executor
-                // For now: placeholder
+        for stage in stage_plan {
+            for system_id in stage {
+                let system = self
+                    .schedule
+                    .system_mut_by_id(system_id)
+                    .ok_or(EcsError::SystemNotFound)?;
+                let system_name = system.name();
+
+                let start = Instant::now();
+                system.run(world)?;
+                let duration = start.elapsed();
+
+                self.profiler.record_execution(system_id, duration);
+                system_timings.push(SystemTiming {
+                    name: system_name.to_string(),
+                    duration,
+                });
             }
 
-            // Barrier: sync point between stages
             self.barrier(world)?;
         }
+
+        let total_frame_time = frame_start.elapsed();
+        self.last_profile = Some(ExecutionProfile {
+            total_frame_time,
+            system_timings,
+        });
+
+        Ok(())
+    }
+
+    /// Execute systems in parallel where possible
+    pub fn execute_frame_parallel(&mut self, world: &mut World) -> Result<()> {
+        use crate::dependency::DependencyGraph;
+        use crate::system::System;
+        use rayon::prelude::*;
+        // Get system accesses
+        let accesses = self.schedule.get_accesses();
+        let graph = DependencyGraph::new(accesses);
+
+        // Clone stages to avoid borrowing issues
+        let stages = graph.stages().to_vec();
+
+        for stage in stages {
+            // Parallel execution logic inline (similar to ParallelExecutor)
+            let systems_ptr = self.schedule.systems.as_mut_ptr() as usize;
+            let systems_len = self.schedule.systems.len();
+            let world_ptr = world as *mut World as usize;
+
+            let results: Vec<Result<()>> = stage
+                .system_indices
+                .par_iter()
+                .map(move |&sys_idx| {
+                    if sys_idx >= systems_len {
+                        return Err(EcsError::SystemNotFound);
+                    }
+
+                    let system =
+                        unsafe { &mut *(systems_ptr as *mut Box<dyn System>).add(sys_idx) };
+                    let world = unsafe { &mut *(world_ptr as *mut World) };
+                    system.run(world)
+                })
+                .collect();
+
+            for result in results {
+                result?;
+            }
+
+            self.barrier(world)?;
+        }
+
+        Ok(())
+    }
+
+    /// Execute with automatic parallel detection
+    pub fn execute_frame_auto(&mut self, world: &mut World) -> Result<()> {
+        // Use parallel if multiple systems, sequential if one
+        if self.schedule.systems.len() > 1 {
+            self.execute_frame_parallel(world)
+        } else {
+            self.execute_frame(world)
+        }
+    }
+
+    /// Execute systems and process observer events
+    pub fn execute_frame_with_events(&mut self, world: &mut World) -> Result<()> {
+        // Execute systems
+        for system in &mut self.schedule.systems {
+            system.run(world)?;
+        }
+
+        // Process queued events
+        world.process_events()?;
+
+        Ok(())
+    }
+
+    /// Execute with events and profiling
+    pub fn execute_frame_full(&mut self, world: &mut World) -> Result<()> {
+        #[cfg(feature = "profiling")]
+        let _span = info_span!("execute_frame_full");
+
+        // Execute systems
+        for system in &mut self.schedule.systems {
+            system.run(world)?;
+        }
+
+        // Process all events
+        world.process_events()?;
+
+        Ok(())
+    }
+
+    /// Execute with hierarchy system
+    pub fn execute_with_hierarchy(&mut self, world: &mut World) -> Result<()> {
+        use crate::hierarchy_system::HierarchyUpdateSystem;
+
+        // Run hierarchy update first (transforms)
+        let mut hierarchy_system = HierarchyUpdateSystem::new();
+        hierarchy_system.run(world)?;
+
+        // Then run user systems
+        for system in &mut self.schedule.systems {
+            system.run(world)?;
+        }
+
+        // Process events if Phase 3 is enabled
+        world.process_events()?;
+
+        Ok(())
+    }
+
+    /// Execute with everything (hierarchy + systems + events)
+    pub fn execute_full(&mut self, world: &mut World) -> Result<()> {
+        use crate::hierarchy_system::HierarchyUpdateSystem;
+
+        // Execute hierarchy system
+        let mut hierarchy_system = HierarchyUpdateSystem::new();
+        hierarchy_system.run(world)?;
+
+        // Execute user systems
+        for system in &mut self.schedule.systems {
+            system.run(world)?;
+        }
+
+        // Process events
+        world.process_events()?;
+
+        Ok(())
+    }
+
+    /// Execute with global event processing (Phase 6)
+    pub fn execute_with_global_events(&mut self, world: &mut World) -> Result<()> {
+        // Execute systems
+        for system in &mut self.schedule.systems {
+            system.run(world)?;
+        }
+
+        // Process global events published by systems
+        world.process_global_events()?;
+
+        Ok(())
+    }
+
+    /// Execute complete frame (hierarchy + systems + global events + entity events)
+    pub fn execute_complete_frame(&mut self, world: &mut World) -> Result<()> {
+        use crate::hierarchy_system::HierarchyUpdateSystem;
+
+        // 1. Update hierarchy transforms
+        let mut hierarchy_system = HierarchyUpdateSystem::new();
+        hierarchy_system.run(world)?;
+
+        // 2. Execute systems
+        for system in &mut self.schedule.systems {
+            system.run(world)?;
+        }
+
+        // 3. Process global events (Phase 6)
+        world.process_global_events()?;
+
+        // 4. Process entity lifecycle events (Phase 3)
+        world.process_events()?;
 
         Ok(())
     }
@@ -111,6 +301,27 @@ impl Executor {
         // Flush command buffers
         // Compact archetypes (optional)
         Ok(())
+    }
+
+    /// Get the most recent execution profile
+    pub fn profile(&self) -> Option<&ExecutionProfile> {
+        self.last_profile.as_ref()
+    }
+
+    /// Print profiling information for the last frame
+    pub fn print_profile(&self) {
+        if let Some(profile) = &self.last_profile {
+            println!(
+                "Frame time: {:.3?} ({} systems)",
+                profile.total_frame_time,
+                profile.system_timings.len()
+            );
+            for (index, timing) in profile.system_timings.iter().enumerate() {
+                println!("  {:02}: {:<24} {:?}", index, timing.name, timing.duration);
+            }
+        } else {
+            println!("No profiling data collected yet.");
+        }
     }
 }
 
@@ -188,7 +399,7 @@ impl ScheduleDebugInfo {
     /// Create from schedule
     pub fn from_schedule(schedule: &Schedule) -> Self {
         let stage_count = schedule.stage_count();
-        let total_systems = schedule.graph.nodes.len();
+        let total_systems = schedule.system_count();
         let systems_per_stage = (0..stage_count)
             .map(|i| schedule.stage_system_count(i))
             .collect();

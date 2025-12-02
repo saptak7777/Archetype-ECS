@@ -17,12 +17,13 @@
 use std::any::TypeId;
 
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::component::Component;
 use crate::entity::EntityId;
 
-/// Component signature  
-pub type ArchetypeSignature = Vec<TypeId>;
+/// Component signature
+pub type ArchetypeSignature = SmallVec<[TypeId; 8]>;
 
 /// Archetype: Structure of Arrays storage
 pub struct Archetype {
@@ -36,13 +37,15 @@ pub struct Archetype {
 impl Archetype {
     /// Create new archetype
     pub fn new(signature: ArchetypeSignature) -> Self {
-        Self {
+        let mut archetype = Self {
             signature,
             entities: Vec::new(),
             components: Vec::new(),
             component_indices: FxHashMap::default(),
             columns_initialized: false,
-        }
+        };
+        archetype.reserve_rows(128);
+        archetype
     }
 
     /// Get signature
@@ -51,9 +54,15 @@ impl Archetype {
     }
 
     /// Allocate row for entity
-    pub fn allocate_row(&mut self, entity: EntityId) -> usize {
+    pub fn allocate_row(&mut self, entity: EntityId, tick: u32) -> usize {
         let row = self.entities.len();
         self.entities.push(entity);
+
+        for column in &mut self.components {
+            column.added_ticks.push(tick);
+            column.changed_ticks.push(tick);
+        }
+
         row
     }
 
@@ -68,6 +77,22 @@ impl Archetype {
         }
 
         self.entities.swap_remove(row);
+
+        for column in &mut self.components {
+            // Handle data swap-remove manually for the byte buffer
+            let item_size = column.item_size;
+            if item_size > 0 {
+                let last_idx = column.len() - 1;
+                if row < last_idx {
+                    // We need to move data from last_idx to row
+                    let src = column.data.as_ptr().add(last_idx * item_size);
+                    let dst = column.data.as_mut_ptr().add(row * item_size);
+                    std::ptr::copy_nonoverlapping(src, dst, item_size);
+                }
+                // Truncate the data vector to remove the last element
+                column.data.set_len(last_idx * item_size);
+            }
+        }
 
         // If we swapped someone in, return their entity so we can update their location
         if row < self.entities.len() {
@@ -115,6 +140,8 @@ impl Archetype {
             self.entities.reserve(additional);
             for column in &mut self.components {
                 column.data.reserve(additional * column.item_size);
+                column.added_ticks.reserve(additional);
+                column.changed_ticks.reserve(additional);
             }
         }
     }
@@ -129,7 +156,7 @@ impl Archetype {
         self.entities.len()
     }
 
-    /// Is empty
+    /// Check if archetype is empty
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()
     }
@@ -160,6 +187,8 @@ pub struct ComponentColumn {
     data: Vec<u8>,
     item_size: usize,
     drop_fn: Option<unsafe fn(*mut u8)>,
+    added_ticks: Vec<u32>,
+    changed_ticks: Vec<u32>,
 }
 
 impl ComponentColumn {
@@ -175,6 +204,8 @@ impl ComponentColumn {
             } else {
                 None
             },
+            added_ticks: Vec::new(),
+            changed_ticks: Vec::new(),
         }
     }
 
@@ -218,6 +249,22 @@ impl ComponentColumn {
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
+    /// Get added tick for a row
+    pub fn get_added_tick(&self, row: usize) -> Option<u32> {
+        self.added_ticks.get(row).copied()
+    }
+
+    /// Get changed tick for a row
+    pub fn get_changed_tick(&self, row: usize) -> Option<u32> {
+        self.changed_ticks.get(row).copied()
+    }
+
+    /// Set changed tick for a row
+    pub fn set_changed_tick(&mut self, row: usize, tick: u32) {
+        if row < self.changed_ticks.len() {
+            self.changed_ticks[row] = tick;
+        }
+    }
 }
 
 impl Drop for ComponentColumn {
@@ -237,10 +284,11 @@ impl Drop for ComponentColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
 
     #[test]
     fn test_archetype_creation() {
-        let sig = vec![TypeId::of::<i32>(), TypeId::of::<f32>()];
+        let sig = smallvec![TypeId::of::<i32>(), TypeId::of::<f32>()];
         let arch = Archetype::new(sig.clone());
         assert_eq!(arch.signature(), &sig);
         assert_eq!(arch.len(), 0);

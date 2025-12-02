@@ -9,7 +9,7 @@
 //! - Entity lookup
 //! - Archetype operations
 
-use aaa_ecs::World as AaaWorld;
+use aaa_ecs::{QueryState, World as AaaWorld};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use hecs::World as HecsWorld;
 
@@ -502,7 +502,7 @@ fn bench_archetype_segregation(c: &mut Criterion) {
     group.finish();
 }
 
-// Bench: Query creation
+// Bench: Query creation and steady-state iteration
 fn bench_query_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("query");
 
@@ -525,7 +525,37 @@ fn bench_query_creation(c: &mut Criterion) {
         }
 
         b.iter(|| {
-            let _state = aaa_ecs::QueryState::<(&Position, &Velocity)>::new(&world);
+            // Intentionally measure construction cost by recreating each iteration
+            let _state = QueryState::<(&Position, &Velocity)>::new(&world);
+        });
+    });
+
+    group.bench_function("aaa_query_iteration_cached_10k", |b| {
+        let mut world = AaaWorld::new();
+        for i in 0..10_000 {
+            let _ = world.spawn((
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                Velocity {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                Health(100),
+            ));
+        }
+
+        let state = QueryState::<(&Position, &Velocity)>::new(&world);
+
+        b.iter(|| {
+            let mut count = 0;
+            for _ in state.iter(&world, 0) {
+                count += 1;
+            }
+            black_box(count);
         });
     });
 
@@ -549,6 +579,35 @@ fn bench_query_creation(c: &mut Criterion) {
 
         b.iter(|| {
             world.query::<(&Position, &Velocity)>().iter().count();
+        });
+    });
+
+    group.bench_function("hecs_query_iteration_10k", |b| {
+        let mut world = HecsWorld::new();
+        for i in 0..10_000 {
+            world.spawn((
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                Velocity {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                Health(100),
+            ));
+        }
+
+        let mut query = world.query::<(&Position, &Velocity)>();
+
+        b.iter(|| {
+            let mut count = 0;
+            for _ in query.iter() {
+                count += 1;
+            }
+            black_box(count);
         });
     });
 

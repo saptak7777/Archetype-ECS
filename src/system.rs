@@ -24,36 +24,53 @@ impl SystemAccess {
         }
     }
 
-    /// Check if conflicts with another access
+    /// Merge two accesses (union of all reads/writes)
+    pub fn merge(&self, other: &SystemAccess) -> SystemAccess {
+        let mut reads = self.reads.clone();
+        let mut writes = self.writes.clone();
+
+        for read in &other.reads {
+            if !reads.contains(read) {
+                reads.push(*read);
+            }
+        }
+
+        for write in &other.writes {
+            if !writes.contains(write) {
+                writes.push(*write);
+            }
+        }
+
+        SystemAccess { reads, writes }
+    }
+
+    /// Check if this access conflicts with another
     pub fn conflicts_with(&self, other: &SystemAccess) -> bool {
-        // Write-write conflicts
-        for w1 in &self.writes {
-            for w2 in &other.writes {
-                if w1 == w2 {
-                    return true;
-                }
+        // Conflict if:
+        // - Both write to same component
+        // - One writes, other reads same component
+
+        for write in &self.writes {
+            if other.writes.contains(write) {
+                return true; // Both write
+            }
+            if other.reads.contains(write) {
+                return true; // One writes, other reads
             }
         }
 
-        // Write-read conflicts
-        for w in &self.writes {
-            for r in &other.reads {
-                if w == r {
-                    return true;
-                }
-            }
-        }
-
-        // Read-write conflicts
-        for r in &self.reads {
-            for w in &other.writes {
-                if r == w {
-                    return true;
-                }
+        for write in &other.writes {
+            if self.reads.contains(write) {
+                return true; // Other writes, we read
             }
         }
 
         false
+    }
+
+    /// Check if two systems can run in parallel
+    pub fn can_run_parallel(&self, other: &SystemAccess) -> bool {
+        !self.conflicts_with(other)
     }
 }
 
@@ -65,8 +82,8 @@ pub trait System: Send + Sync {
     /// Get system name
     fn name(&self) -> &'static str;
 
-    /// Run system
-    fn run(&mut self, world: &World) -> Result<()>;
+    /// Run system logic against the world
+    fn run(&mut self, world: &mut World) -> Result<()>;
 }
 
 /// Boxed system
@@ -96,5 +113,32 @@ mod tests {
         access2.reads.push(TypeId::of::<i32>());
 
         assert!(!access1.conflicts_with(&access2));
+    }
+
+    #[derive(Default)]
+    struct DummySystem;
+
+    impl System for DummySystem {
+        fn access(&self) -> SystemAccess {
+            SystemAccess::empty()
+        }
+
+        fn name(&self) -> &'static str {
+            "dummy_system"
+        }
+
+        fn run(&mut self, world: &mut World) -> Result<()> {
+            // Spawn and immediately despawn to ensure mutable access works
+            let entity = world.spawn((42i32,))?;
+            world.despawn(entity).ok();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_system_run_signature() {
+        let mut world = World::new();
+        let mut system = DummySystem;
+        system.run(&mut world).expect("system should run");
     }
 }
