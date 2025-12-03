@@ -3,11 +3,213 @@ use crate::error::Result;
 use crate::system::System;
 use crate::world::World;
 use rayon::prelude::*;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-/// Parallel executor using rayon work-stealing
+/// Priority levels for system execution
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    Critical = 3, // On critical path
+    High = 2,     // Heavy computation or important systems
+    Normal = 1,   // Default priority
+    Low = 0,      // Lightweight systems
+}
+
+/// A scheduled task with priority and cost estimation
+#[derive(Debug, Clone)]
+pub struct ScheduledTask {
+    pub system_index: usize,
+    pub priority: Priority,
+    pub estimated_cost: Duration,
+    pub stage_depth: usize,
+}
+
+impl PartialEq for ScheduledTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.system_index == other.system_index
+    }
+}
+
+impl Eq for ScheduledTask {}
+
+impl PartialOrd for ScheduledTask {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScheduledTask {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Higher priority first, then by estimated cost (larger first for better load balancing)
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.estimated_cost.cmp(&self.estimated_cost))
+    }
+}
+
+/// Tracks execution statistics for adaptive profiling
+#[derive(Debug, Clone)]
+pub struct ExecutionStats {
+    pub total_runs: usize,
+    pub total_time: Duration,
+    pub avg_time: Duration,
+    pub last_time: Duration,
+}
+
+impl ExecutionStats {
+    fn new() -> Self {
+        Self {
+            total_runs: 0,
+            total_time: Duration::ZERO,
+            avg_time: Duration::from_micros(100), // Default estimate
+            last_time: Duration::ZERO,
+        }
+    }
+
+    fn record(&mut self, duration: Duration) {
+        self.total_runs += 1;
+        self.total_time += duration;
+        self.last_time = duration;
+        self.avg_time = self.total_time / self.total_runs as u32;
+    }
+
+    fn estimated_cost(&self) -> Duration {
+        if self.total_runs == 0 {
+            Duration::from_micros(100)
+        } else {
+            // Use weighted average: 70% historical average, 30% last run
+            (self.avg_time * 7 + self.last_time * 3) / 10
+        }
+    }
+}
+
+/// Task scheduler with priority queues and load balancing
+pub struct TaskScheduler {
+    execution_stats: HashMap<usize, ExecutionStats>,
+    load_per_thread: Arc<Vec<AtomicUsize>>, // Microseconds of work per thread
+}
+
+impl TaskScheduler {
+    pub fn new() -> Self {
+        let thread_count = rayon::current_num_threads();
+        let load_per_thread = Arc::new((0..thread_count).map(|_| AtomicUsize::new(0)).collect());
+
+        Self {
+            execution_stats: HashMap::new(),
+            load_per_thread,
+        }
+    }
+
+    /// Assign priority to a system based on critical path and execution history
+    pub fn assign_priority(
+        &self,
+        system_index: usize,
+        is_critical: bool,
+        stage_depth: usize,
+    ) -> Priority {
+        if is_critical {
+            return Priority::Critical;
+        }
+
+        // Check if system is expensive (>1ms average)
+        if let Some(stats) = self.execution_stats.get(&system_index) {
+            if stats.avg_time > Duration::from_millis(1) {
+                return Priority::High;
+            } else if stats.avg_time < Duration::from_micros(100) {
+                return Priority::Low;
+            }
+        }
+
+        // Systems early in the graph get higher priority
+        if stage_depth == 0 {
+            Priority::High
+        } else {
+            Priority::Normal
+        }
+    }
+
+    /// Get estimated cost for a system
+    pub fn estimated_cost(&self, system_index: usize) -> Duration {
+        self.execution_stats
+            .get(&system_index)
+            .map(|s| s.estimated_cost())
+            .unwrap_or_else(|| Duration::from_micros(100))
+    }
+
+    /// Record execution time for adaptive profiling
+    pub fn record_execution(&mut self, system_index: usize, duration: Duration) {
+        self.execution_stats
+            .entry(system_index)
+            .or_insert_with(ExecutionStats::new)
+            .record(duration);
+    }
+
+    /// Create scheduled tasks from a stage
+    pub fn schedule_stage(
+        &self,
+        stage: &ExecutionStage,
+        critical_path: &[usize],
+    ) -> Vec<ScheduledTask> {
+        let mut tasks: Vec<ScheduledTask> = stage
+            .system_indices
+            .iter()
+            .map(|&sys_idx| {
+                let is_critical = critical_path.contains(&sys_idx);
+                let priority = self.assign_priority(sys_idx, is_critical, stage.depth);
+                let estimated_cost = self.estimated_cost(sys_idx);
+
+                ScheduledTask {
+                    system_index: sys_idx,
+                    priority,
+                    estimated_cost,
+                    stage_depth: stage.depth,
+                }
+            })
+            .collect();
+
+        // Sort by priority (highest first)
+        tasks.sort_by(|a, b| b.cmp(a));
+        tasks
+    }
+
+    /// Reset load tracking for a new frame
+    pub fn reset_load_tracking(&self) {
+        for load in self.load_per_thread.iter() {
+            load.store(0, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Get current thread's load
+    pub fn get_thread_load(&self, thread_id: usize) -> usize {
+        if thread_id < self.load_per_thread.len() {
+            self.load_per_thread[thread_id].load(AtomicOrdering::Relaxed)
+        } else {
+            0
+        }
+    }
+
+    /// Add load to current thread
+    pub fn add_thread_load(&self, thread_id: usize, microseconds: usize) {
+        if thread_id < self.load_per_thread.len() {
+            self.load_per_thread[thread_id].fetch_add(microseconds, AtomicOrdering::Relaxed);
+        }
+    }
+}
+
+impl Default for TaskScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Parallel executor using rayon work-stealing with advanced scheduling
 pub struct ParallelExecutor {
     pub systems: Vec<Box<dyn System>>,
     dependency_graph: DependencyGraph,
+    scheduler: TaskScheduler,
 }
 
 impl ParallelExecutor {
@@ -25,23 +227,78 @@ impl ParallelExecutor {
         Self {
             systems,
             dependency_graph: graph,
+            scheduler: TaskScheduler::new(),
         }
     }
 
-    /// Execute all systems in parallel with proper ordering
+    /// Execute all systems in parallel with optimal scheduling
     pub fn execute_parallel(&mut self, world: &mut World) -> Result<()> {
-        // Clone stages to avoid borrowing self while executing
+        // Reset load tracking for this frame
+        self.scheduler.reset_load_tracking();
+
+        // Clone stages and critical path to avoid borrowing issues
         let stages = self.dependency_graph.stages().to_vec();
+        let critical_path = self.dependency_graph.critical_path().to_vec();
 
         for stage in &stages {
-            // Execute all systems in this stage in parallel
-            self.execute_stage(stage, world)?;
+            // Schedule tasks with priorities
+            let tasks = self.scheduler.schedule_stage(stage, &critical_path);
+
+            // Execute stage with scheduled tasks
+            self.execute_stage_scheduled(&tasks, world)?;
         }
 
         Ok(())
     }
 
-    /// Execute a single stage (all systems in parallel)
+    /// Execute a stage with scheduled tasks (priority-based)
+    fn execute_stage_scheduled(
+        &mut self,
+        tasks: &[ScheduledTask],
+        world: &mut World,
+    ) -> Result<()> {
+        // Convert pointers to usize for Send + Sync
+        let systems_ptr = self.systems.as_mut_ptr() as usize;
+        let world_ptr = world as *mut World as usize;
+
+        // Execute tasks in parallel with priority ordering
+        let results: Vec<(usize, Duration, Result<()>)> = tasks
+            .par_iter()
+            .map(|task| {
+                let start = Instant::now();
+                let sys_idx = task.system_index;
+
+                // Validate index bounds
+                if sys_idx == usize::MAX {
+                    return (
+                        sys_idx,
+                        Duration::ZERO,
+                        Err(crate::error::EcsError::SystemNotFound),
+                    );
+                }
+
+                // SAFETY: Same safety guarantees as before
+                let system = unsafe { &mut *(systems_ptr as *mut Box<dyn System>).add(sys_idx) };
+                let world = unsafe { &mut *(world_ptr as *mut World) };
+
+                let result = system.run(world);
+                let duration = start.elapsed();
+
+                (sys_idx, duration, result)
+            })
+            .collect();
+
+        // Record execution times and propagate errors
+        for (sys_idx, duration, result) in results {
+            self.scheduler.record_execution(sys_idx, duration);
+            result?;
+        }
+
+        Ok(())
+    }
+
+    /// Execute a single stage (all systems in parallel) - legacy method for backward compatibility
+    #[allow(dead_code)]
     ///
     /// # Safety Architecture
     ///
@@ -78,7 +335,6 @@ impl ParallelExecutor {
     /// 4. **Bounds Safety**: Index validation prevents out-of-bounds access
     fn execute_stage(&mut self, stage: &ExecutionStage, world: &mut World) -> Result<()> {
         // Convert pointers to usize for Send + Sync across thread boundaries
-        // This is safe because we're only using them as opaque handles
         let systems_ptr = self.systems.as_mut_ptr() as usize;
         let world_ptr = world as *mut World as usize;
 
@@ -122,6 +378,16 @@ impl ParallelExecutor {
     pub fn dependency_graph(&self) -> &DependencyGraph {
         &self.dependency_graph
     }
+
+    /// Get scheduler for inspection
+    pub fn scheduler(&self) -> &TaskScheduler {
+        &self.scheduler
+    }
+
+    /// Get mutable scheduler for configuration
+    pub fn scheduler_mut(&mut self) -> &mut TaskScheduler {
+        &mut self.scheduler
+    }
 }
 
 #[cfg(test)]
@@ -158,5 +424,49 @@ mod tests {
 
         let executor = ParallelExecutor::new(systems);
         assert_eq!(executor.systems.len(), 1);
+    }
+
+    #[test]
+    fn test_priority_assignment() {
+        let scheduler = TaskScheduler::new();
+
+        // Critical systems get highest priority
+        assert_eq!(scheduler.assign_priority(0, true, 0), Priority::Critical);
+
+        // Non-critical at depth 0 get high priority
+        assert_eq!(scheduler.assign_priority(0, false, 0), Priority::High);
+
+        // Non-critical at higher depth get normal priority
+        assert_eq!(scheduler.assign_priority(0, false, 1), Priority::Normal);
+    }
+
+    #[test]
+    fn test_task_scheduling() {
+        let scheduler = TaskScheduler::new();
+        let stage = ExecutionStage {
+            system_indices: vec![0, 1, 2],
+            depth: 0,
+        };
+        let critical_path = vec![1];
+
+        let tasks = scheduler.schedule_stage(&stage, &critical_path);
+
+        assert_eq!(tasks.len(), 3);
+        // System 1 should be first (critical)
+        assert_eq!(tasks[0].system_index, 1);
+        assert_eq!(tasks[0].priority, Priority::Critical);
+    }
+
+    #[test]
+    fn test_adaptive_profiling() {
+        let mut scheduler = TaskScheduler::new();
+
+        // Record some executions
+        scheduler.record_execution(0, Duration::from_millis(2));
+        scheduler.record_execution(0, Duration::from_millis(3));
+
+        // Should now classify as high priority due to cost
+        let priority = scheduler.assign_priority(0, false, 1);
+        assert_eq!(priority, Priority::High);
     }
 }

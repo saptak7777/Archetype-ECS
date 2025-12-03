@@ -3,6 +3,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use std::any::TypeId;
 
 struct HeavySystem {
+    #[allow(dead_code)]
     id: usize,
     reads: Vec<TypeId>,
     writes: Vec<TypeId>,

@@ -3,6 +3,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::any::{Any, TypeId};
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct TestEvent(u32);
 
 impl Event for TestEvent {

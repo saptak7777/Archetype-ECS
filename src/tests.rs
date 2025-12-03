@@ -17,6 +17,7 @@
 #[cfg(test)]
 mod tests {
     #![allow(dead_code)]
+    #![allow(clippy::module_inception)]
     use crate::{
         CommandBuffer, Executor, Query, QueryState, Schedule, System, SystemAccess, World,
     };

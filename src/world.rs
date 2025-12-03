@@ -193,7 +193,8 @@ impl World {
     {
         let location = self.entity_locations.get(entity)?;
         let archetype = self.archetypes.get(location.archetype_id)?;
-        Q::fetch(archetype, location.archetype_row, 0)
+        let state = Q::prepare(archetype, 0)?;
+        unsafe { Q::fetch(&state, location.archetype_row) }
     }
 
     /// Get multiple mutable components at once using QueryFetchMut
@@ -206,7 +207,8 @@ impl World {
     {
         let location = self.entity_locations.get(entity)?;
         let archetype = self.archetypes.get_mut(location.archetype_id)?;
-        Q::fetch_mut(archetype, location.archetype_row, 0, self.tick)
+        let mut state = Q::prepare(archetype, self.tick)?;
+        unsafe { Q::fetch(&mut state, location.archetype_row) }
     }
 
     /// Create a mutable query wrapper for the provided filter
@@ -235,6 +237,11 @@ impl World {
     /// Get all archetypes
     pub fn archetypes(&self) -> &[Archetype] {
         &self.archetypes
+    }
+
+    /// Internal helper to expose archetype pointers for query iteration
+    pub(crate) fn archetype_ptr(&self, id: usize) -> Option<NonNull<Archetype>> {
+        self.archetypes.get(id).map(NonNull::from)
     }
 
     /// Internal helper to expose archetype pointers for query iteration

@@ -82,17 +82,140 @@ where
     }
 }
 
-/// Mutable query iterator
-pub struct QueryIterMut<'w, Q: QueryFilter> {
+/// Immutable query iterator
+pub struct QueryIter<'w, Q: QueryFilter>
+where
+    Q: QueryFetch<'w>,
+{
     archetypes: Vec<NonNull<Archetype>>,
     archetype_index: usize,
     entity_index: usize,
     change_tick: u32,
+    state: Option<Q::State>,
+    _phantom: PhantomData<&'w Q>,
+}
+
+impl<'w, Q: QueryFilter> QueryIter<'w, Q>
+where
+    Q: QueryFetch<'w>,
+{
+    /// Create new immutable query iterator
+    fn new(world: &'w World, matched: &[usize], change_tick: u32) -> Self {
+        let mut archetypes = Vec::with_capacity(matched.len());
+        for &id in matched {
+            if let Some(ptr) = world.archetype_ptr(id) {
+                archetypes.push(ptr);
+            }
+        }
+
+        Self {
+            archetypes,
+            archetype_index: 0,
+            entity_index: 0,
+            change_tick,
+            state: None,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'w, Q> Iterator for QueryIter<'w, Q>
+where
+    Q: QueryFilter + QueryFetch<'w>,
+{
+    type Item = <Q as QueryFetch<'w>>::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.state.is_none() {
+                if self.archetype_index >= self.archetypes.len() {
+                    return None;
+                }
+
+                let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
+                // SAFETY: Valid pointer from world, tied to 'w lifetime
+                let archetype = unsafe { &*archetype_ptr };
+
+                self.state = Q::prepare(archetype, self.change_tick);
+                self.entity_index = 0;
+
+                if self.state.is_none() {
+                    self.archetype_index += 1;
+                    continue;
+                }
+            }
+
+            let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
+            let archetype = unsafe { &*archetype_ptr };
+
+            if self.entity_index < archetype.len() {
+                let row = self.entity_index;
+                self.entity_index += 1;
+
+                // SAFETY: We checked bounds above. State is valid for this archetype.
+                if let Some(item) = unsafe { Q::fetch(self.state.as_ref().unwrap(), row) } {
+                    return Some(item);
+                } else {
+                    continue;
+                }
+            } else {
+                self.state = None;
+                self.archetype_index += 1;
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<'w, Q> ExactSizeIterator for QueryIter<'w, Q>
+where
+    Q: QueryFilter + QueryFetch<'w>,
+{
+    fn len(&self) -> usize {
+        if self.archetype_index >= self.archetypes.len() {
+            return 0;
+        }
+
+        let mut count = 0;
+
+        let current_ptr = self.archetypes[self.archetype_index].as_ptr();
+        // SAFETY: Pointer is valid for 'w lifetime and comes from world.archetype_ptr()
+        let current = unsafe { &*current_ptr };
+        count += current.len().saturating_sub(self.entity_index);
+
+        for archetype_ptr in self.archetypes.iter().skip(self.archetype_index + 1) {
+            // SAFETY: All pointers in self.archetypes are valid for the query lifetime
+            let archetype = unsafe { &*archetype_ptr.as_ptr() };
+            count += archetype.len();
+        }
+
+        count
+    }
+}
+
+/// Mutable query iterator
+pub struct QueryIterMut<'w, Q: QueryFilter>
+where
+    Q: QueryFetchMut<'w>,
+{
+    archetypes: Vec<NonNull<Archetype>>,
+    archetype_index: usize,
+    entity_index: usize,
+    #[allow(dead_code)] // Reserved for future change detection features
+    change_tick: u32,
     current_tick: u32,
+    state: Option<Q::State>,
     _phantom: PhantomData<&'w mut Q>,
 }
 
-impl<'w, Q: QueryFilter> QueryIterMut<'w, Q> {
+impl<'w, Q: QueryFilter> QueryIterMut<'w, Q>
+where
+    Q: QueryFetchMut<'w>,
+{
     /// Create new mutable query iterator
     fn new(world: &'w mut World, matched: &[usize], change_tick: u32, current_tick: u32) -> Self {
         let mut archetypes = Vec::with_capacity(matched.len());
@@ -108,6 +231,7 @@ impl<'w, Q: QueryFilter> QueryIterMut<'w, Q> {
             entity_index: 0,
             change_tick,
             current_tick,
+            state: None,
             _phantom: PhantomData,
         }
     }
@@ -120,33 +244,53 @@ where
     type Item = <Q as QueryFetchMut<'w>>::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.archetype_index < self.archetypes.len() {
-            let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
-            // SAFETY: This is safe because:
-            // 1. archetype_ptr comes from world.archetype_ptr_mut() which returns valid pointers
-            // 2. The pointer is valid for the lifetime 'w (tied to world borrow)
-            // 3. No other code is mutating the archetype list during iteration
-            // 4. NonNull guarantees the pointer is non-null
-            // 5. The archetype exists for the duration of the query
-            let archetype = unsafe { &mut *archetype_ptr };
+        loop {
+            // Check if we have a valid state for current archetype
+            if self.state.is_none() {
+                if self.archetype_index >= self.archetypes.len() {
+                    return None;
+                }
 
-            if self.entity_index < archetype.len() {
-                let row = self.entity_index;
-                self.entity_index += 1;
-                if let Some(item) =
-                    Q::fetch_mut(archetype, row, self.change_tick, self.current_tick)
-                {
-                    return Some(item);
-                } else {
+                let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
+                // SAFETY: This is safe because:
+                // 1. archetype_ptr comes from world.archetype_ptr_mut() which returns valid pointers
+                // 2. The pointer is valid for the lifetime 'w (tied to world borrow)
+                // 3. No other code is mutating the archetype list during iteration
+                // 4. NonNull guarantees the pointer is non-null
+                // 5. The archetype exists for the duration of the query
+                let archetype = unsafe { &mut *archetype_ptr };
+
+                self.state = Q::prepare(archetype, self.current_tick);
+                self.entity_index = 0;
+
+                if self.state.is_none() {
+                    self.archetype_index += 1;
                     continue;
                 }
             }
 
-            self.archetype_index += 1;
-            self.entity_index = 0;
-        }
+            // We have a state, try to fetch
+            let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
+            // SAFETY: Same as above
+            let archetype = unsafe { &*archetype_ptr };
 
-        None
+            if self.entity_index < archetype.len() {
+                let row = self.entity_index;
+                self.entity_index += 1;
+
+                // SAFETY: We checked bounds above. State is valid for this archetype.
+                // SAFETY: We checked bounds above. State is valid for this archetype.
+                if let Some(item) = unsafe { Q::fetch(self.state.as_mut().unwrap(), row) } {
+                    return Some(item);
+                } else {
+                    continue;
+                }
+            } else {
+                // Finished this archetype
+                self.state = None;
+                self.archetype_index += 1;
+            }
+        }
     }
 }
 
@@ -176,66 +320,261 @@ where
     }
 }
 
-/// Extracts mutable component data from a matching archetype row
-pub trait QueryFetchMut<'w>: Sized {
-    /// Item returned by the mutable iterator
+/// Trait for fetching component data (immutable)
+///
+/// # Safety
+/// Implementations must ensure that `fetch` is safe to call with the state returned by `prepare`.
+pub unsafe trait QueryFetch<'w>: QueryFilter {
+    /// The type of data returned by the query
     type Item;
+    /// State used to fetch data (e.g. column pointers)
+    type State;
 
-    /// Fetch mutable component data for the given archetype row
-    fn fetch_mut(
-        archetype: &'w mut Archetype,
-        row: usize,
-        change_tick: u32,
-        current_tick: u32,
-    ) -> Option<Self::Item>;
+    /// Prepare to fetch from an archetype
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State>;
+
+    /// Fetch data for a specific entity
+    ///
+    /// # Safety
+    /// - `row` must be valid for the archetype used in `prepare`
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item>;
 }
 
-impl<'w, T: Component> QueryFetchMut<'w> for &'w mut T {
-    type Item = &'w mut T;
+// QueryFetch implementations for immutable component access
+unsafe impl<'w, T: Component> QueryFetch<'w> for &'w T {
+    type Item = &'w T;
+    type State = &'w ComponentColumn;
 
-    fn fetch_mut(
-        archetype: &'w mut Archetype,
-        row: usize,
-        _change_tick: u32,
-        current_tick: u32,
-    ) -> Option<Self::Item> {
+    fn prepare(archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
+        let type_id = TypeId::of::<T>();
+        archetype.get_column(type_id)
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        state.get::<T>(row)
+    }
+}
+
+/// Trait for fetching component data (mutable)
+///
+/// # Safety
+/// Implementations must ensure that `fetch` is safe to call with the state returned by `prepare`.
+pub unsafe trait QueryFetchMut<'w>: QueryFilter {
+    /// The type of data returned by the query
+    type Item;
+    /// State used to fetch data (e.g. column pointers)
+    type State;
+
+    /// Prepare to fetch from an archetype
+    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State>;
+
+    /// Fetch data for a specific entity
+    ///
+    /// # Safety
+    /// - `row` must be valid for the archetype used in `prepare`
+    /// - Must not be called multiple times for the same row (aliasing)
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item>;
+}
+
+unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w mut T {
+    type Item = &'w mut T;
+    type State = (*mut ComponentColumn, u32);
+
+    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
         let type_id = TypeId::of::<T>();
         let column = archetype.get_column_mut(type_id)?;
+        Some((column as *mut ComponentColumn, current_tick))
+    }
 
-        // Set changed tick for mutation tracking
-        column.set_changed_tick(row, current_tick);
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        let (column_ptr, current_tick) = state;
+        // SAFETY: The column pointer is valid for the lifetime 'w and points to a valid ComponentColumn.
+        // The caller ensures that row is a valid index within the column.
+        let column = unsafe { &mut **column_ptr };
+        column.set_changed_tick(row, *current_tick);
         column.get_mut::<T>(row)
     }
 }
 
-macro_rules! impl_query_fetch_mut_tuple {
-    ($($T:ident),+) => {
-        impl<'w, $($T: Component),+> QueryFetchMut<'w> for ($(&'w mut $T,)+) {
-            type Item = ($(&'w mut $T,)+);
+// Manual implementations for tuple QueryFetchMut to avoid macro complexity with indices
 
-            fn fetch_mut(archetype: &'w mut Archetype, row: usize, _change_tick: u32, current_tick: u32) -> Option<Self::Item> {
-                let mut indices = Vec::with_capacity(crate::component::MAX_BUNDLE_COMPONENTS);
-                $(
-                    let idx = archetype.column_index(TypeId::of::<$T>())?;
-                    indices.push((idx, indices.len()));
-                )+
+unsafe impl<'w, A: Component, B: Component> QueryFetchMut<'w> for (&'w mut A, &'w mut B) {
+    type Item = (&'w mut A, &'w mut B);
+    type State = (
+        <&'w mut A as QueryFetchMut<'w>>::State,
+        <&'w mut B as QueryFetchMut<'w>>::State,
+    );
 
-                let columns = borrow_columns_mut(archetype.components_mut(), indices)?;
-                let mut iter = columns.into_iter();
+    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+        let idx_a = archetype.column_index(TypeId::of::<A>())?;
+        let idx_b = archetype.column_index(TypeId::of::<B>())?;
 
-                Some(($({
-                    let column = iter.next()?;
-                    column.set_changed_tick(row, current_tick);
-                    column.get_mut::<$T>(row)?
-                },)+))
-            }
-        }
-    };
+        let indices = vec![(idx_a, 0), (idx_b, 1)];
+        let columns = borrow_columns_mut(archetype.components_mut(), indices)?;
+        let mut iter = columns.into_iter();
+
+        let col_a = iter.next()?;
+        let col_b = iter.next()?;
+
+        Some(((col_a, current_tick), (col_b, current_tick)))
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        Some((
+            <&'w mut A as QueryFetchMut<'w>>::fetch(&mut state.0, row)?,
+            <&'w mut B as QueryFetchMut<'w>>::fetch(&mut state.1, row)?,
+        ))
+    }
 }
 
-impl_query_fetch_mut_tuple!(A, B);
-impl_query_fetch_mut_tuple!(A, B, C);
-impl_query_fetch_mut_tuple!(A, B, C, D);
+unsafe impl<'w, A: Component, B: Component, C: Component> QueryFetchMut<'w>
+    for (&'w mut A, &'w mut B, &'w mut C)
+{
+    type Item = (&'w mut A, &'w mut B, &'w mut C);
+    type State = (
+        <&'w mut A as QueryFetchMut<'w>>::State,
+        <&'w mut B as QueryFetchMut<'w>>::State,
+        <&'w mut C as QueryFetchMut<'w>>::State,
+    );
+
+    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+        let idx_a = archetype.column_index(TypeId::of::<A>())?;
+        let idx_b = archetype.column_index(TypeId::of::<B>())?;
+        let idx_c = archetype.column_index(TypeId::of::<C>())?;
+
+        let indices = vec![(idx_a, 0), (idx_b, 1), (idx_c, 2)];
+        let columns = borrow_columns_mut(archetype.components_mut(), indices)?;
+        let mut iter = columns.into_iter();
+
+        let col_a = iter.next()?;
+        let col_b = iter.next()?;
+        let col_c = iter.next()?;
+
+        Some((
+            (col_a, current_tick),
+            (col_b, current_tick),
+            (col_c, current_tick),
+        ))
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        Some((
+            <&'w mut A as QueryFetchMut<'w>>::fetch(&mut state.0, row)?,
+            <&'w mut B as QueryFetchMut<'w>>::fetch(&mut state.1, row)?,
+            <&'w mut C as QueryFetchMut<'w>>::fetch(&mut state.2, row)?,
+        ))
+    }
+}
+
+unsafe impl<'w, A: Component, B: Component, C: Component, D: Component> QueryFetchMut<'w>
+    for (&'w mut A, &'w mut B, &'w mut C, &'w mut D)
+{
+    type Item = (&'w mut A, &'w mut B, &'w mut C, &'w mut D);
+    type State = (
+        <&'w mut A as QueryFetchMut<'w>>::State,
+        <&'w mut B as QueryFetchMut<'w>>::State,
+        <&'w mut C as QueryFetchMut<'w>>::State,
+        <&'w mut D as QueryFetchMut<'w>>::State,
+    );
+
+    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+        let idx_a = archetype.column_index(TypeId::of::<A>())?;
+        let idx_b = archetype.column_index(TypeId::of::<B>())?;
+        let idx_c = archetype.column_index(TypeId::of::<C>())?;
+        let idx_d = archetype.column_index(TypeId::of::<D>())?;
+
+        let indices = vec![(idx_a, 0), (idx_b, 1), (idx_c, 2), (idx_d, 3)];
+        let columns = borrow_columns_mut(archetype.components_mut(), indices)?;
+        let mut iter = columns.into_iter();
+
+        let col_a = iter.next()?;
+        let col_b = iter.next()?;
+        let col_c = iter.next()?;
+        let col_d = iter.next()?;
+
+        Some((
+            (col_a, current_tick),
+            (col_b, current_tick),
+            (col_c, current_tick),
+            (col_d, current_tick),
+        ))
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        Some((
+            <&'w mut A as QueryFetchMut<'w>>::fetch(&mut state.0, row)?,
+            <&'w mut B as QueryFetchMut<'w>>::fetch(&mut state.1, row)?,
+            <&'w mut C as QueryFetchMut<'w>>::fetch(&mut state.2, row)?,
+            <&'w mut D as QueryFetchMut<'w>>::fetch(&mut state.3, row)?,
+        ))
+    }
+}
+
+// Manual implementations for tuple QueryFetch (immutable) to avoid macro complexity
+
+unsafe impl<'w, A: QueryFetch<'w>, B: QueryFetch<'w>> QueryFetch<'w> for (A, B) {
+    type Item = (A::Item, B::Item);
+    type State = (A::State, B::State);
+
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
+        Some((
+            A::prepare(archetype, change_tick)?,
+            B::prepare(archetype, change_tick)?,
+        ))
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        Some((A::fetch(&state.0, row)?, B::fetch(&state.1, row)?))
+    }
+}
+
+unsafe impl<'w, A: QueryFetch<'w>, B: QueryFetch<'w>, C: QueryFetch<'w>> QueryFetch<'w>
+    for (A, B, C)
+{
+    type Item = (A::Item, B::Item, C::Item);
+    type State = (A::State, B::State, C::State);
+
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
+        Some((
+            A::prepare(archetype, change_tick)?,
+            B::prepare(archetype, change_tick)?,
+            C::prepare(archetype, change_tick)?,
+        ))
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        Some((
+            A::fetch(&state.0, row)?,
+            B::fetch(&state.1, row)?,
+            C::fetch(&state.2, row)?,
+        ))
+    }
+}
+
+unsafe impl<'w, A: QueryFetch<'w>, B: QueryFetch<'w>, C: QueryFetch<'w>, D: QueryFetch<'w>>
+    QueryFetch<'w> for (A, B, C, D)
+{
+    type Item = (A::Item, B::Item, C::Item, D::Item);
+    type State = (A::State, B::State, C::State, D::State);
+
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
+        Some((
+            A::prepare(archetype, change_tick)?,
+            B::prepare(archetype, change_tick)?,
+            C::prepare(archetype, change_tick)?,
+            D::prepare(archetype, change_tick)?,
+        ))
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        Some((
+            A::fetch(&state.0, row)?,
+            B::fetch(&state.1, row)?,
+            C::fetch(&state.2, row)?,
+            D::fetch(&state.3, row)?,
+        ))
+    }
+}
 
 /// Safely borrow multiple mutable references to different columns
 ///
@@ -302,21 +641,6 @@ fn borrow_columns_mut(
             })
             .collect(),
     )
-}
-
-/// Extracts immutable component data from a matching archetype row
-pub trait QueryFetch<'w>: Sized {
-    /// Item returned by the iterator
-    type Item;
-
-    /// Fetch component data for the given archetype row
-    ///
-    /// # Safety
-    /// Caller must ensure:
-    /// - The archetype reference is valid for the lifetime 'w
-    /// - The row index is within bounds of the archetype
-    /// - No mutable aliases exist for the fetched data
-    fn fetch(archetype: &'w Archetype, row: usize, change_tick: u32) -> Option<Self::Item>;
 }
 
 /// Cached query state
@@ -388,18 +712,11 @@ impl<F: QueryFilter> QueryState<F> {
     /// Iterate query results
     ///
     /// Note: Returns iterator that borrows from self.matched_archetypes
-    pub fn iter<'w, 's>(&'s self, world: &'w World, change_tick: u32) -> QueryIter<'w, 's, F>
+    pub fn iter<'w, 's>(&'s self, world: &'w World, change_tick: u32) -> QueryIter<'w, F>
     where
         F: QueryFetch<'w>,
     {
-        QueryIter {
-            world,
-            archetype_index: 0,
-            entity_index: 0,
-            matched_archetypes: &self.matched_archetypes,
-            change_tick,
-            _phantom: PhantomData,
-        }
+        QueryIter::new(world, &self.matched_archetypes, change_tick)
     }
 
     /// Iterate query results mutably
@@ -442,61 +759,6 @@ impl<F: QueryFilter> QueryState<F> {
     }
 }
 
-/// Query iterator
-pub struct QueryIter<'w, 's, Q: QueryFilter> {
-    world: &'w World,
-    archetype_index: usize,
-    entity_index: usize,
-    matched_archetypes: &'s [usize],
-    change_tick: u32,
-    _phantom: PhantomData<Q>,
-}
-
-impl<'w, 's, Q> Iterator for QueryIter<'w, 's, Q>
-where
-    Q: QueryFilter + QueryFetch<'w>,
-{
-    type Item = <Q as QueryFetch<'w>>::Item;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.archetype_index < self.matched_archetypes.len() {
-            let arch_id = self.matched_archetypes[self.archetype_index];
-            let archetype = self.world.get_archetype(arch_id)?;
-
-            if self.entity_index < archetype.len() {
-                let row = self.entity_index;
-                self.entity_index += 1;
-                if let Some(item) = Q::fetch(archetype, row, self.change_tick) {
-                    return Some(item);
-                } else {
-                    continue;
-                }
-            }
-
-            // Move to next archetype
-            self.archetype_index += 1;
-            self.entity_index = 0;
-        }
-
-        None
-    }
-}
-
-impl<'w, 's, Q> ExactSizeIterator for QueryIter<'w, 's, Q>
-where
-    Q: QueryFilter + QueryFetch<'w>,
-{
-    fn len(&self) -> usize {
-        let mut count = 0;
-        for &arch_id in self.matched_archetypes {
-            if let Some(arch) = self.world.get_archetype(arch_id) {
-                count += arch.len();
-            }
-        }
-        count.saturating_sub(self.entity_index)
-    }
-}
-
 /// Stateless query wrapper
 pub struct Query<'w, Q>
 where
@@ -530,6 +792,7 @@ where
             archetype_index: 0,
             entity_index: 0,
             change_tick: 0, // Stateless query matches everything
+            state: None,
             _phantom: PhantomData,
         }
     }
@@ -540,16 +803,17 @@ where
     }
 }
 
-/// Owned query iterator (for Query::iter)
-///
-/// Unlike QueryIter which borrows matched_archetypes,
-/// this owns the vec so it can be returned from Query::iter
-pub struct QueryIterOwned<'w, Q: QueryFilter> {
+/// Owned query iterator (holds its own state)
+pub struct QueryIterOwned<'w, Q: QueryFilter>
+where
+    Q: QueryFetch<'w>,
+{
     world: &'w World,
+    matched_archetypes: Vec<usize>,
     archetype_index: usize,
     entity_index: usize,
-    matched_archetypes: Vec<usize>,
     change_tick: u32,
+    state: Option<Q::State>,
     _phantom: PhantomData<Q>,
 }
 
@@ -560,26 +824,42 @@ where
     type Item = <Q as QueryFetch<'w>>::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.archetype_index < self.matched_archetypes.len() {
+        loop {
+            if self.state.is_none() {
+                if self.archetype_index >= self.matched_archetypes.len() {
+                    return None;
+                }
+
+                let arch_id = self.matched_archetypes[self.archetype_index];
+                let archetype = self.world.get_archetype(arch_id)?;
+
+                self.state = Q::prepare(archetype, self.change_tick);
+                self.entity_index = 0;
+
+                if self.state.is_none() {
+                    self.archetype_index += 1;
+                    continue;
+                }
+            }
+
             let arch_id = self.matched_archetypes[self.archetype_index];
             let archetype = self.world.get_archetype(arch_id)?;
 
             if self.entity_index < archetype.len() {
                 let row = self.entity_index;
                 self.entity_index += 1;
-                if let Some(item) = Q::fetch(archetype, row, self.change_tick) {
+
+                // SAFETY: We checked bounds above. State is valid for this archetype.
+                if let Some(item) = unsafe { Q::fetch(self.state.as_ref().unwrap(), row) } {
                     return Some(item);
                 } else {
                     continue;
                 }
+            } else {
+                self.state = None;
+                self.archetype_index += 1;
             }
-
-            // Move to next archetype
-            self.archetype_index += 1;
-            self.entity_index = 0;
         }
-
-        None
     }
 }
 
@@ -595,6 +875,114 @@ where
             }
         }
         count.saturating_sub(self.entity_index)
+    }
+}
+
+// QueryFetch implementations for filter types
+
+unsafe impl<'w, T: 'static> QueryFetch<'w> for With<T> {
+    type Item = ();
+    type State = ();
+
+    fn prepare(_archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
+        Some(())
+    }
+
+    unsafe fn fetch(_state: &Self::State, _row: usize) -> Option<Self::Item> {
+        Some(())
+    }
+}
+
+unsafe impl<'w, T: 'static> QueryFetch<'w> for Without<T> {
+    type Item = ();
+    type State = ();
+
+    fn prepare(_archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
+        Some(())
+    }
+
+    unsafe fn fetch(_state: &Self::State, _row: usize) -> Option<Self::Item> {
+        Some(())
+    }
+}
+
+unsafe impl<'w, T: 'static> QueryFetch<'w> for Changed<T> {
+    type Item = ();
+    type State = (&'w ComponentColumn, u32);
+
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
+        let type_id = TypeId::of::<T>();
+        archetype
+            .get_column(type_id)
+            .map(|column| (column, change_tick))
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        let (column, change_tick) = state;
+        // SAFETY: `row` is assumed to be a valid index for the column.
+        if column.get_changed_tick(row)? > *change_tick {
+            Some(())
+        } else {
+            None
+        }
+    }
+}
+
+unsafe impl<'w, T: 'static> QueryFetch<'w> for Added<T> {
+    type Item = ();
+    type State = (&'w ComponentColumn, u32);
+
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
+        let type_id = TypeId::of::<T>();
+        archetype
+            .get_column(type_id)
+            .map(|column| (column, change_tick))
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        let (column, change_tick) = state;
+        // SAFETY: `row` is assumed to be a valid index for the column.
+        if column.get_added_tick(row)? > *change_tick {
+            Some(())
+        } else {
+            None
+        }
+    }
+}
+
+unsafe impl<'w, T: Component> QueryFetch<'w> for Read<T> {
+    type Item = &'w T;
+    type State = &'w ComponentColumn;
+
+    fn prepare(archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
+        let type_id = TypeId::of::<T>();
+        archetype.get_column(type_id)
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        // SAFETY: `row` is assumed to be a valid index for the column.
+        state.get::<T>(row)
+    }
+}
+
+unsafe impl<'w, T: Component> QueryFetchMut<'w> for Write<T> {
+    type Item = &'w mut T;
+    type State = (*mut ComponentColumn, u32);
+
+    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+        let type_id = TypeId::of::<T>();
+        archetype
+            .get_column_mut(type_id)
+            .map(|column| (column as *mut ComponentColumn, current_tick))
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        let (column_ptr, current_tick) = state;
+        // SAFETY: The column pointer is valid for the lifetime 'w and points to a valid ComponentColumn.
+        // The caller ensures that row is a valid index within the column.
+        let column = &mut **column_ptr;
+        column.set_changed_tick(row, *current_tick);
+        column.get_mut::<T>(row)
     }
 }
 
@@ -616,7 +1004,7 @@ impl<F: QueryFilter> CachedQuery<F> {
     }
 
     /// Iterate query (updates state automatically)
-    pub fn iter<'w, 's>(&'s mut self, world: &'w World) -> QueryIter<'w, 's, F>
+    pub fn iter<'w>(&mut self, world: &'w World) -> QueryIter<'w, F>
     where
         F: QueryFetch<'w>,
     {
@@ -763,105 +1151,6 @@ macro_rules! impl_query_filter {
 impl_query_filter!(A, B);
 impl_query_filter!(A, B, C);
 impl_query_filter!(A, B, C, D);
-
-// QueryFetch implementations for immutable component access
-impl<'w, T: Component> QueryFetch<'w> for &'w T {
-    type Item = &'w T;
-
-    fn fetch(archetype: &'w Archetype, row: usize, _change_tick: u32) -> Option<Self::Item> {
-        let type_id = TypeId::of::<T>();
-        let column = archetype.get_column(type_id)?;
-        column.get::<T>(row)
-    }
-}
-
-impl<'w, T: 'static> QueryFetch<'w> for With<T> {
-    type Item = ();
-
-    fn fetch(_archetype: &'w Archetype, _row: usize, _change_tick: u32) -> Option<Self::Item> {
-        Some(())
-    }
-}
-
-impl<'w, T: 'static> QueryFetch<'w> for Without<T> {
-    type Item = ();
-
-    fn fetch(_archetype: &'w Archetype, _row: usize, _change_tick: u32) -> Option<Self::Item> {
-        Some(())
-    }
-}
-
-impl<'w, T: 'static> QueryFetch<'w> for Changed<T> {
-    type Item = ();
-
-    fn fetch(archetype: &'w Archetype, row: usize, change_tick: u32) -> Option<Self::Item> {
-        let type_id = TypeId::of::<T>();
-        let column = archetype.get_column(type_id)?;
-        if column.get_changed_tick(row)? > change_tick {
-            Some(())
-        } else {
-            None
-        }
-    }
-}
-
-impl<'w, T: 'static> QueryFetch<'w> for Added<T> {
-    type Item = ();
-
-    fn fetch(archetype: &'w Archetype, row: usize, change_tick: u32) -> Option<Self::Item> {
-        let type_id = TypeId::of::<T>();
-        let column = archetype.get_column(type_id)?;
-        if column.get_added_tick(row)? > change_tick {
-            Some(())
-        } else {
-            None
-        }
-    }
-}
-
-impl<'w, T: Component> QueryFetch<'w> for Read<T> {
-    type Item = &'w T;
-
-    fn fetch(archetype: &'w Archetype, row: usize, _change_tick: u32) -> Option<Self::Item> {
-        let type_id = TypeId::of::<T>();
-        let column = archetype.get_column(type_id)?;
-        column.get::<T>(row)
-    }
-}
-
-impl<'w, T: Component> QueryFetchMut<'w> for Write<T> {
-    type Item = &'w mut T;
-
-    fn fetch_mut(
-        archetype: &'w mut Archetype,
-        row: usize,
-        _change_tick: u32,
-        current_tick: u32,
-    ) -> Option<Self::Item> {
-        let type_id = TypeId::of::<T>();
-        let column = archetype.get_column_mut(type_id)?;
-        column.set_changed_tick(row, current_tick);
-        column.get_mut::<T>(row)
-    }
-}
-
-macro_rules! impl_query_fetch_tuple {
-    ($($T:ident),+) => {
-        impl<'w, $($T: QueryFetch<'w>),+> QueryFetch<'w> for ($($T,)+) {
-            type Item = ($($T::Item,)+);
-
-            fn fetch(archetype: &'w Archetype, row: usize, change_tick: u32) -> Option<Self::Item> {
-                Some((
-                    $($T::fetch(archetype, row, change_tick)?,)+
-                ))
-            }
-        }
-    }
-}
-
-impl_query_fetch_tuple!(A, B);
-impl_query_fetch_tuple!(A, B, C);
-impl_query_fetch_tuple!(A, B, C, D);
 
 #[cfg(test)]
 mod tests {
