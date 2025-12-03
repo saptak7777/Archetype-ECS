@@ -3,8 +3,8 @@ use crate::error::Result;
 use crate::system::System;
 use crate::world::World;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -88,7 +88,7 @@ impl ExecutionStats {
 
 /// Task scheduler with priority queues and load balancing
 pub struct TaskScheduler {
-    execution_stats: HashMap<usize, ExecutionStats>,
+    execution_stats: FxHashMap<usize, ExecutionStats>,
     load_per_thread: Arc<Vec<AtomicUsize>>, // Microseconds of work per thread
 }
 
@@ -98,7 +98,7 @@ impl TaskScheduler {
         let load_per_thread = Arc::new((0..thread_count).map(|_| AtomicUsize::new(0)).collect());
 
         Self {
-            execution_stats: HashMap::new(),
+            execution_stats: FxHashMap::default(),
             load_per_thread,
         }
     }

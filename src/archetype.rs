@@ -22,8 +22,22 @@ use smallvec::SmallVec;
 use crate::component::Component;
 use crate::entity::EntityId;
 
+/// Chunk size in bytes (16KB - fits in L1 cache, Unity DOTS standard)
+pub const CHUNK_SIZE_BYTES: usize = 16384;
+
+/// Default chunk size in entities for iteration
+pub const DEFAULT_CHUNK_SIZE: usize = 64;
+
 /// Component signature
 pub type ArchetypeSignature = SmallVec<[TypeId; 8]>;
+
+/// Chunk of entities with contiguous component data for cache-friendly iteration
+pub struct ArchetypeChunk<'a> {
+    /// Range of entity indices in this chunk
+    pub entity_range: std::ops::Range<usize>,
+    /// Reference to the archetype
+    pub archetype: &'a Archetype,
+}
 
 /// Archetype: Structure of Arrays storage
 pub struct Archetype {
@@ -179,6 +193,26 @@ impl Archetype {
         self.entities.len()
     }
 
+    /// Iterate over chunks of entities for cache-friendly processing
+    ///
+    /// Returns an iterator over chunks of entities. Each chunk contains
+    /// a contiguous range of entities for better cache locality.
+    ///
+    /// # Arguments
+    /// * `chunk_size` - Number of entities per chunk (default: 64)
+    pub fn chunks(&self, chunk_size: usize) -> impl Iterator<Item = ArchetypeChunk> + '_ {
+        let total_entities = self.len();
+        let chunk_size = chunk_size.max(1); // Ensure at least 1 entity per chunk
+
+        (0..total_entities).step_by(chunk_size).map(move |start| {
+            let end = (start + chunk_size).min(total_entities);
+            ArchetypeChunk {
+                entity_range: start..end,
+                archetype: self,
+            }
+        })
+    }
+
     /// Check if archetype is empty
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()
@@ -210,8 +244,11 @@ pub struct ComponentColumn {
     data: Vec<u8>,
     item_size: usize,
     drop_fn: Option<unsafe fn(*mut u8)>,
-    added_ticks: Vec<u32>,
-    changed_ticks: Vec<u32>,
+    pub(crate) added_ticks: Vec<u32>,
+    pub(crate) changed_ticks: Vec<u32>,
+
+    /// Chunk-level change tracking for efficient filtering
+    last_change_tick: u32,
 }
 
 impl ComponentColumn {
@@ -243,6 +280,7 @@ impl ComponentColumn {
             },
             added_ticks: Vec::new(),
             changed_ticks: Vec::new(),
+            last_change_tick: 0,
         }
     }
 
@@ -268,6 +306,19 @@ impl ComponentColumn {
         // 3. The pointer is valid for item_size bytes
         // 4. Vec guarantees proper alignment for u8
         unsafe { self.data.as_mut_ptr().add(offset) }
+    }
+
+    /// Mark component as changed at given row
+    pub fn mark_changed(&mut self, row: usize, tick: u32) {
+        if row < self.changed_ticks.len() {
+            self.changed_ticks[row] = tick;
+            self.last_change_tick = tick;
+        }
+    }
+
+    /// Check if this column has changed since the given tick
+    pub fn changed_since(&self, tick: u32) -> bool {
+        self.last_change_tick > tick
     }
 
     /// Get component at index

@@ -26,15 +26,21 @@ impl SystemAccess {
 
     /// Merge two accesses (union of all reads/writes)
     pub fn merge(&self, other: &SystemAccess) -> SystemAccess {
-        let mut reads = self.reads.clone();
-        let mut writes = self.writes.clone();
+        let mut reads = Vec::with_capacity(self.reads.len() + other.reads.len());
+        let mut writes = Vec::with_capacity(self.writes.len() + other.writes.len());
 
+        // Add our reads/writes first
+        reads.extend_from_slice(&self.reads);
+        writes.extend_from_slice(&self.writes);
+
+        // Add other's reads if not already present
         for read in &other.reads {
             if !reads.contains(read) {
                 reads.push(*read);
             }
         }
 
+        // Add other's writes if not already present
         for write in &other.writes {
             if !writes.contains(write) {
                 writes.push(*write);

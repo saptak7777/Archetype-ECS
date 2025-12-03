@@ -25,7 +25,7 @@ mod tests {
     use std::any::TypeId;
 
     #[test]
-    fn test_basic_spawn_despawn() {
+    fn test_basic_spawn_despawn() -> Result<()> {
         let mut world = World::new();
 
         #[allow(dead_code)]
@@ -36,16 +36,18 @@ mod tests {
         }
 
         // Spawn entity
-        let entity = world.spawn((Position { x: 1.0, y: 2.0 },)).unwrap();
+        let entity = world.spawn((Position { x: 1.0, y: 2.0 },))?;
         assert!(world.get_entity_location(entity).is_some());
 
         // Despawn entity
-        world.despawn(entity).unwrap();
+        world.despawn(entity)?;
+        world.flush_removals()?; // Process deferred removals
         assert!(world.get_entity_location(entity).is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_spawn_despawn_errors() {
+    fn test_spawn_despawn_errors() -> Result<()> {
         let mut world = World::new();
 
         #[derive(Debug)]
@@ -56,11 +58,13 @@ mod tests {
 
         let entity = world.spawn((Position { x: 1.0, y: 2.0 },)).unwrap();
 
-        // First despawn should succeed
-        assert!(world.despawn(entity).is_ok());
+        // Despawn should succeed
+        world.despawn(entity)?;
+        world.flush_removals()?; // Process deferred removals
 
-        // Second despawn should fail
+        // Double despawn should fail
         assert!(world.despawn(entity).is_err());
+        Ok(())
     }
 
     #[test]
@@ -99,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_exists() {
+    fn test_entity_exists() -> Result<()> {
         let mut world = World::new();
 
         struct Comp;
@@ -107,8 +111,10 @@ mod tests {
         let entity = world.spawn((Comp,)).unwrap();
         assert!(world.entity_exists(entity));
 
-        world.despawn(entity).unwrap();
+        world.despawn(entity)?;
+        world.flush_removals()?; // Process deferred removals
         assert!(!world.entity_exists(entity));
+        Ok(())
     }
 
     #[test]
@@ -154,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_count() {
+    fn test_entity_count() -> Result<()> {
         let mut world = World::new();
 
         struct Comp;
@@ -166,14 +172,15 @@ mod tests {
         assert_eq!(world.entity_count(), 10);
 
         for entity in entities {
-            world.despawn(entity).unwrap();
+            world.despawn(entity)?;
         }
-
+        world.flush_removals()?; // Process deferred removals
         assert_eq!(world.entity_count(), 0);
+        Ok(())
     }
 
     #[test]
-    fn test_recycled_entity_count() {
+    fn test_recycled_entity_count() -> Result<()> {
         let mut world = World::new();
 
         struct Comp;
@@ -181,7 +188,8 @@ mod tests {
         let e1 = world.spawn((Comp,)).unwrap();
         assert_eq!(world.recycled_entity_count(), 0);
 
-        world.despawn(e1).unwrap();
+        world.despawn(e1)?;
+        world.flush_removals()?; // Process deferred removals
         assert_eq!(world.recycled_entity_count(), 1);
 
         // Spawn again should reuse the ID
@@ -189,6 +197,7 @@ mod tests {
         assert_eq!(world.recycled_entity_count(), 0);
         // Slotmap keys are opaque; ensure entity now exists again
         assert!(world.entity_exists(e2));
+        Ok(())
     }
 
     #[test]

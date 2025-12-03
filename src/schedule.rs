@@ -2,7 +2,8 @@
 //!
 //! Constructs system execution schedule via topological sort.
 
-use std::collections::{HashMap, VecDeque};
+use rustc_hash::FxHashMap;
+use std::collections::VecDeque;
 
 use crate::error::{EcsError, Result};
 use crate::system::{BoxedSystem, System, SystemAccess, SystemId};
@@ -17,16 +18,16 @@ pub struct SystemNode {
 /// Dependency graph for systems
 pub struct SystemGraph {
     pub nodes: Vec<SystemNode>,
-    pub edges: HashMap<SystemId, Vec<SystemId>>,
-    pub reverse_edges: HashMap<SystemId, Vec<SystemId>>,
+    pub edges: FxHashMap<SystemId, Vec<SystemId>>,
+    pub reverse_edges: FxHashMap<SystemId, Vec<SystemId>>,
 }
 
 impl SystemGraph {
     /// Build graph from systems
     pub fn build(systems: &[BoxedSystem]) -> Self {
-        let mut nodes = Vec::new();
-        let mut edges: HashMap<SystemId, Vec<SystemId>> = HashMap::new();
-        let mut reverse_edges: HashMap<SystemId, Vec<SystemId>> = HashMap::new();
+        let mut nodes = Vec::with_capacity(systems.len());
+        let mut edges: FxHashMap<SystemId, Vec<SystemId>> = FxHashMap::default();
+        let mut reverse_edges: FxHashMap<SystemId, Vec<SystemId>> = FxHashMap::default();
 
         // Create nodes
         for (i, system) in systems.iter().enumerate() {
@@ -59,9 +60,9 @@ impl SystemGraph {
 
     /// Topological sort (Kahn's algorithm)
     pub fn topological_sort(&self) -> Result<Vec<SystemId>> {
-        let mut in_degree: HashMap<SystemId, usize> = HashMap::new();
+        let mut in_degree: FxHashMap<SystemId, usize> = FxHashMap::default();
         let mut queue = VecDeque::new();
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.nodes.len());
 
         // Calculate in-degrees
         for node in &self.nodes {
@@ -262,10 +263,10 @@ impl Schedule {
         self.systems.get_mut(id.0 as usize)
     }
 
-    pub(crate) fn stage_plan(&self) -> Vec<Vec<SystemId>> {
+    pub(crate) fn stage_plan(&self) -> Vec<&[SystemId]> {
         self.stages
             .iter()
-            .map(|stage| stage.systems.clone())
+            .map(|stage| stage.systems.as_slice())
             .collect()
     }
 

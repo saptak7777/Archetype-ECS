@@ -1,5 +1,6 @@
 use crate::system::SystemAccess;
-use std::collections::{HashMap, HashSet, VecDeque};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::VecDeque;
 
 /// Represents execution stages where all systems in a stage can run in parallel
 #[derive(Clone, Debug)]
@@ -13,7 +14,7 @@ pub struct DependencyGraph {
     stages: Vec<ExecutionStage>,
     critical_path: Vec<usize>,
     #[allow(dead_code)] // Used for future graph analysis features
-    adjacency_list: HashMap<usize, Vec<usize>>,
+    adjacency_list: FxHashMap<usize, Vec<usize>>,
 }
 
 impl DependencyGraph {
@@ -32,8 +33,8 @@ impl DependencyGraph {
 
     /// Build adjacency list representing dependencies between systems
     /// If system A must run before system B, then A -> B in the graph
-    fn build_adjacency_list(accesses: &[SystemAccess]) -> HashMap<usize, Vec<usize>> {
-        let mut graph = HashMap::new();
+    fn build_adjacency_list(accesses: &[SystemAccess]) -> FxHashMap<usize, Vec<usize>> {
+        let mut graph = FxHashMap::default();
 
         for i in 0..accesses.len() {
             graph.insert(i, Vec::new());
@@ -56,7 +57,7 @@ impl DependencyGraph {
     /// This ensures optimal parallelization while respecting dependencies
     fn build_stages_topological(
         accesses: &[SystemAccess],
-        adjacency_list: &HashMap<usize, Vec<usize>>,
+        adjacency_list: &FxHashMap<usize, Vec<usize>>,
     ) -> Vec<ExecutionStage> {
         if accesses.is_empty() {
             return vec![];
@@ -82,7 +83,7 @@ impl DependencyGraph {
         }
 
         // Topological sort with depth tracking (Kahn's algorithm)
-        let mut sorted = Vec::new();
+        let mut sorted = Vec::with_capacity(accesses.len());
         while let Some(node) = queue.pop_front() {
             sorted.push(node);
 
@@ -146,7 +147,7 @@ impl DependencyGraph {
         depths: &[usize],
     ) {
         // Collect systems not yet assigned to any stage
-        let mut assigned: HashSet<usize> = stages
+        let mut assigned: FxHashSet<usize> = stages
             .iter()
             .flat_map(|s| s.system_indices.iter().copied())
             .collect();
@@ -159,7 +160,7 @@ impl DependencyGraph {
 
         // Assign unassigned systems to stages
         while !unassigned.is_empty() {
-            let mut next_unassigned = Vec::new();
+            let mut next_unassigned = Vec::with_capacity(unassigned.len());
 
             for &sys_idx in &unassigned {
                 let target_depth = depths[sys_idx];
@@ -206,7 +207,7 @@ impl DependencyGraph {
     /// Find the critical path (longest dependency chain) for priority scheduling
     fn find_critical_path(
         stages: &[ExecutionStage],
-        adjacency_list: &HashMap<usize, Vec<usize>>,
+        adjacency_list: &FxHashMap<usize, Vec<usize>>,
     ) -> Vec<usize> {
         if stages.is_empty() {
             return vec![];
@@ -230,7 +231,7 @@ impl DependencyGraph {
         let mut current = max_depth_system;
 
         // Build reverse adjacency list
-        let mut reverse_adj: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut reverse_adj: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
         for (&from, targets) in adjacency_list {
             for &to in targets {
                 reverse_adj.entry(to).or_default().push(from);

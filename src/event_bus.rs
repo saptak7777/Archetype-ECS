@@ -163,7 +163,8 @@ impl Default for EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     struct TestEvent;
     impl Event for TestEvent {
@@ -182,7 +183,7 @@ mod tests {
 
     impl EventSubscriber for TestSubscriber {
         fn on_event(&mut self, _event: &dyn Event) -> Result<()> {
-            *self.call_count.lock().unwrap() += 1;
+            *self.call_count.lock() += 1;
             Ok(())
         }
     }
@@ -202,7 +203,7 @@ mod tests {
         assert_eq!(bus.queue_size(), 1);
         bus.process_events().unwrap();
 
-        assert_eq!(*count.lock().unwrap(), 1);
+        assert_eq!(*count.lock(), 1);
     }
 
     #[test]
@@ -222,8 +223,8 @@ mod tests {
         bus.publish_event(TestEvent).unwrap();
         bus.process_events().unwrap();
 
-        assert_eq!(*count1.lock().unwrap(), 1);
-        assert_eq!(*count2.lock().unwrap(), 1);
+        assert_eq!(*count1.lock(), 1);
+        assert_eq!(*count2.lock(), 1);
     }
 
     #[test]

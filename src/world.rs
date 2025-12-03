@@ -67,6 +67,9 @@ pub struct World {
 
     /// Current world tick
     tick: u32,
+
+    /// Deferred removal queue for safe entity deletion during iteration
+    removal_queue: Vec<EntityId>,
 }
 
 impl World {
@@ -84,6 +87,7 @@ impl World {
             global_event_bus: crate::event_bus::EventBus::new(),
             resource_manager: crate::resources::ResourceManager::default(),
             tick: 1, // Start at 1 so change detection works on first query
+            removal_queue: Vec::new(),
         };
 
         // Create empty archetype for entities with no components
@@ -147,8 +151,23 @@ impl World {
         Ok(entity)
     }
 
-    /// Despawn entity
+    /// Despawn entity (deferred - queued for removal)
+    ///
+    /// Entities are not immediately removed to avoid issues during iteration.
+    /// Call `flush_removals()` to process the removal queue.
     pub fn despawn(&mut self, entity: EntityId) -> Result<()> {
+        // Validate entity exists
+        if !self.entity_locations.contains_key(entity) {
+            return Err(EcsError::EntityNotFound);
+        }
+
+        // Queue for deferred removal
+        self.removal_queue.push(entity);
+        Ok(())
+    }
+
+    /// Despawn entity immediately (use with caution during iteration)
+    pub fn despawn_immediate(&mut self, entity: EntityId) -> Result<()> {
         if let Some(location) = self.entity_locations.remove(entity) {
             let archetype = &mut self.archetypes[location.archetype_id];
             unsafe {
@@ -163,6 +182,22 @@ impl World {
         } else {
             Err(EcsError::EntityNotFound)
         }
+    }
+
+    /// Flush deferred removal queue
+    ///
+    /// Processes all entities queued for removal in batch.
+    /// This is more efficient than removing one-by-one and safe during iteration.
+    pub fn flush_removals(&mut self) -> Result<()> {
+        // Collect entities to remove (avoid borrow checker issues)
+        let entities_to_remove: Vec<EntityId> = self.removal_queue.drain(..).collect();
+
+        // Process all queued removals
+        for entity in entities_to_remove {
+            // Ignore errors for already-removed entities
+            let _ = self.despawn_immediate(entity);
+        }
+        Ok(())
     }
 
     /// Get entity location
@@ -181,8 +216,13 @@ impl World {
     /// Get mutable reference to a component on an entity
     pub fn get_component_mut<T: Component>(&mut self, entity: EntityId) -> Option<&mut T> {
         let location = self.entity_locations.get(entity)?;
+        let tick = self.tick;
         let archetype = self.archetypes.get_mut(location.archetype_id)?;
         let column = archetype.get_column_mut(TypeId::of::<T>())?;
+
+        // Mark component as changed for change detection
+        column.mark_changed(location.archetype_row, tick);
+
         column.get_mut::<T>(location.archetype_row)
     }
 
@@ -339,12 +379,13 @@ impl World {
         // Not found, create new archetype
         let id = self.archetypes.len();
 
-        // Create new archetype with the signature
-        let mut archetype = Archetype::new(signature.clone());
+        // Create new archetype with the signature (move ownership)
+        let signature_vec: ArchetypeSignature = signature.iter().copied().collect();
+        let mut archetype = Archetype::new(signature_vec.clone());
         on_create(&mut archetype);
 
         // Store in archetype index and cache
-        self.archetype_index.insert(signature.clone(), id);
+        self.archetype_index.insert(signature_vec, id);
         self.archetypes.push(archetype);
 
         id
@@ -470,7 +511,7 @@ impl World {
         // We need to work around Rust's borrow checker here.
         // We can't borrow event_queue and observers simultaneously since both are in self.
         // Solution: drain events into a temporary vector, then process with unsafe aliasing.
-        let mut events_to_process = Vec::new();
+        let mut events_to_process = Vec::with_capacity(self.event_queue.len());
         while let Some(event) = self.event_queue.pop() {
             events_to_process.push(event);
         }
@@ -542,7 +583,7 @@ impl World {
 
     /// Get all descendants of entity
     pub fn get_descendants(&self, entity: EntityId) -> Result<Vec<EntityId>> {
-        let mut descendants = Vec::new();
+        let mut descendants = Vec::with_capacity(16); // Typical hierarchy depth
 
         self.traverse_hierarchy(entity, &mut |e| {
             if e != entity {
@@ -713,18 +754,12 @@ mod tests {
     fn test_spawn_despawn() -> Result<()> {
         let mut world = World::new();
 
-        #[derive(Debug)]
-        struct Position {
-            x: f32,
-            y: f32,
-        }
-
-        let entity = world.spawn((Position { x: 1.0, y: 2.0 },))?;
+        let entity = world.spawn((42i32,)).unwrap();
         assert!(world.get_entity_location(entity).is_some());
 
-        world.despawn(entity)?;
+        world.despawn(entity).unwrap();
+        world.flush_removals().unwrap(); // Process deferred removals
         assert!(world.get_entity_location(entity).is_none());
-
         Ok(())
     }
 

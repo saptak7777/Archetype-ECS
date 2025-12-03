@@ -9,7 +9,7 @@ use crate::error::{EcsError, Result};
 use crate::schedule::Schedule;
 use crate::system::{System, SystemId};
 use crate::World;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::time::{Duration, Instant};
 
 /// System execution profiler
@@ -23,15 +23,15 @@ pub struct SystemStats {
 
 /// System profiler for collecting timing data
 pub struct SystemProfiler {
-    timings: HashMap<SystemId, Vec<Duration>>,
-    call_counts: HashMap<SystemId, u64>,
+    timings: FxHashMap<SystemId, Vec<Duration>>,
+    call_counts: FxHashMap<SystemId, u64>,
 }
 
 impl SystemProfiler {
     pub fn new() -> Self {
         Self {
-            timings: HashMap::new(),
-            call_counts: HashMap::new(),
+            timings: FxHashMap::default(),
+            call_counts: FxHashMap::default(),
         }
     }
 
@@ -107,9 +107,15 @@ impl Executor {
     /// Execute one frame
     pub fn execute_frame(&mut self, world: &mut World) -> Result<()> {
         self.schedule.ensure_built()?;
-        let stage_plan = self.schedule.stage_plan();
+        // Collect stage plan to avoid borrow checker issues
+        let stage_plan: Vec<Vec<SystemId>> = self
+            .schedule
+            .stage_plan()
+            .iter()
+            .map(|stage| stage.to_vec())
+            .collect();
         let frame_start = Instant::now();
-        let mut system_timings = Vec::new();
+        let mut system_timings = Vec::with_capacity(self.schedule.systems.len());
 
         for stage in stage_plan {
             for system_id in stage {

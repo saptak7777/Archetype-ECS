@@ -906,7 +906,7 @@ unsafe impl<'w, T: 'static> QueryFetch<'w> for Without<T> {
     }
 }
 
-unsafe impl<'w, T: 'static> QueryFetch<'w> for Changed<T> {
+unsafe impl<'w, T: Component> QueryFetch<'w> for Changed<T> {
     type Item = ();
     type State = (&'w ComponentColumn, u32);
 
@@ -919,8 +919,8 @@ unsafe impl<'w, T: 'static> QueryFetch<'w> for Changed<T> {
 
     unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
         let (column, change_tick) = state;
-        // SAFETY: `row` is assumed to be a valid index for the column.
-        if column.get_changed_tick(row)? > *change_tick {
+        // Check if this specific row has changed since the given tick
+        if row < column.changed_ticks.len() && column.changed_ticks[row] > *change_tick {
             Some(())
         } else {
             None
@@ -928,6 +928,7 @@ unsafe impl<'w, T: 'static> QueryFetch<'w> for Changed<T> {
     }
 }
 
+// With query filter
 unsafe impl<'w, T: 'static> QueryFetch<'w> for Added<T> {
     type Item = ();
     type State = (&'w ComponentColumn, u32);
@@ -1104,12 +1105,15 @@ impl<T: 'static> QueryFilter for Without<T> {
     }
 }
 
-/// Filter for entities where component T has changed
-pub struct Changed<T>(PhantomData<T>);
+/// Query filter for components that changed since last system run
+///
+/// Usage: `Query<&Position, Changed<Position>>` - only entities where Position changed
+pub struct Changed<T: Component>(PhantomData<T>);
 
-impl<T: 'static> QueryFilter for Changed<T> {
+impl<T: Component> QueryFilter for Changed<T> {
     fn matches_archetype(archetype: &Archetype) -> bool {
-        archetype.signature().contains(&TypeId::of::<T>())
+        // Check if archetype has this component type
+        archetype.get_column(TypeId::of::<T>()).is_some()
     }
 
     fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
