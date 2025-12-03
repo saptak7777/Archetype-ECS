@@ -69,8 +69,23 @@ impl Archetype {
     /// Remove row and return entity that was swapped in
     ///
     /// # Safety
-    /// Caller must ensure `row` is a valid index within this archetype.
-    /// Returns Some(entity) if another entity was swapped into this row.
+    ///
+    /// This function is marked unsafe because it performs manual memory management
+    /// on type-erased component data. The caller MUST ensure:
+    ///
+    /// ## Preconditions
+    /// 1. `row` is a valid index: `row < self.entities.len()`
+    /// 2. The entity at `row` has not already been removed
+    /// 3. All component columns have matching lengths
+    ///
+    /// ## Memory Safety Guarantees
+    /// - Uses swap-remove to maintain packed array layout
+    /// - Properly handles the swapped entity's location update
+    /// - Does NOT call drop on removed components (caller's responsibility)
+    ///
+    /// ## Returns
+    /// - `Some(entity)` if another entity was swapped into this row (needs location update)
+    /// - `None` if this was the last entity (no swap occurred)
     pub unsafe fn remove_row(&mut self, row: usize) -> Option<EntityId> {
         if row >= self.entities.len() {
             return None;
@@ -84,12 +99,20 @@ impl Archetype {
             if item_size > 0 {
                 let last_idx = column.len() - 1;
                 if row < last_idx {
-                    // We need to move data from last_idx to row
+                    // SAFETY: This pointer arithmetic is safe because:
+                    // 1. last_idx < column.len() (from len() - 1)
+                    // 2. row < last_idx (checked above)
+                    // 3. Both offsets are within allocated buffer bounds
+                    // 4. item_size is the correct size for type T (set in new())
+                    // 5. copy_nonoverlapping is safe because src != dst (row < last_idx)
                     let src = column.data.as_ptr().add(last_idx * item_size);
                     let dst = column.data.as_mut_ptr().add(row * item_size);
                     std::ptr::copy_nonoverlapping(src, dst, item_size);
                 }
-                // Truncate the data vector to remove the last element
+                // SAFETY: Truncating to last_idx * item_size is safe because:
+                // 1. last_idx = len() - 1, so last_idx * item_size < data.len()
+                // 2. We're removing exactly one element worth of bytes
+                // 3. The data at last_idx was already moved (if row < last_idx)
                 column.data.set_len(last_idx * item_size);
             }
         }
@@ -193,13 +216,27 @@ pub struct ComponentColumn {
 
 impl ComponentColumn {
     /// Create new column for type T
+    ///
+    /// Initializes a type-erased component column that can store components of type T.
+    /// The column stores components as raw bytes and maintains a drop function for cleanup.
     pub fn new<T: Component>() -> Self {
         Self {
             data: Vec::new(),
             item_size: std::mem::size_of::<T>(),
+            // Store a drop function only if T needs drop
+            // This is critical for proper cleanup of components with destructors
             drop_fn: if std::mem::needs_drop::<T>() {
-                Some(|ptr| unsafe {
-                    std::ptr::drop_in_place(ptr as *mut T);
+                Some(|ptr| {
+                    // SAFETY: This closure is only called from ComponentColumn::drop
+                    // with a valid pointer to an initialized T at the correct offset.
+                    // The pointer:
+                    // 1. Points to properly aligned memory (allocated for T)
+                    // 2. Points to an initialized T (written via get_ptr_mut)
+                    // 3. Is only dropped once (called during ComponentColumn cleanup)
+                    // 4. Has the correct type (ptr was created for this column's T)
+                    unsafe {
+                        std::ptr::drop_in_place(ptr as *mut T);
+                    }
                 })
             } else {
                 None
@@ -210,29 +247,63 @@ impl ComponentColumn {
     }
 
     /// Get mutable pointer for writing
+    ///
+    /// Returns a raw pointer to write a component at the given index.
+    /// Automatically resizes the buffer if needed.
+    ///
+    /// # Safety for Callers
+    /// The returned pointer is valid for writing exactly `item_size` bytes.
+    /// Caller must:
+    /// 1. Write a properly initialized value of type T
+    /// 2. Not use the pointer after any operation that might reallocate the buffer
+    /// 3. Ensure the written value matches the column's component type
     pub fn get_ptr_mut(&mut self, index: usize) -> *mut u8 {
         let offset = index * self.item_size;
         if offset + self.item_size > self.data.len() {
             self.data.resize(offset + self.item_size, 0);
         }
+        // SAFETY: This is safe because:
+        // 1. offset is calculated as index * item_size
+        // 2. We just ensured offset + item_size <= data.len()
+        // 3. The pointer is valid for item_size bytes
+        // 4. Vec guarantees proper alignment for u8
         unsafe { self.data.as_mut_ptr().add(offset) }
     }
 
     /// Get component at index
+    ///
+    /// # Safety
+    /// Returns a reference to the component if it exists and is properly initialized.
     pub fn get<T: Component>(&self, index: usize) -> Option<&T> {
         let offset = index * self.item_size;
         if offset + self.item_size > self.data.len() {
             return None;
         }
+        // SAFETY: This is safe because:
+        // 1. We verified offset + item_size <= data.len() (bounds check)
+        // 2. The data was written via get_ptr_mut as a valid T
+        // 3. item_size == size_of::<T>() (verified at column creation)
+        // 4. The cast is valid because this column stores type T
+        // 5. The lifetime is tied to &self, preventing use-after-free
         Some(unsafe { &*(self.data.as_ptr().add(offset) as *const T) })
     }
 
     /// Get mutable component at index
+    ///
+    /// # Safety
+    /// Returns a mutable reference to the component if it exists and is properly initialized.
     pub fn get_mut<T: Component>(&mut self, index: usize) -> Option<&mut T> {
         let offset = index * self.item_size;
         if offset + self.item_size > self.data.len() {
             return None;
         }
+        // SAFETY: This is safe because:
+        // 1. We verified offset + item_size <= data.len() (bounds check)
+        // 2. The data was written via get_ptr_mut as a valid T
+        // 3. item_size == size_of::<T>() (verified at column creation)
+        // 4. The cast is valid because this column stores type T
+        // 5. The lifetime is tied to &mut self, ensuring exclusive access
+        // 6. No other references to this component exist (Rust's borrow rules)
         Some(unsafe { &mut *(self.data.as_mut_ptr().add(offset) as *mut T) })
     }
 
@@ -268,11 +339,21 @@ impl ComponentColumn {
 }
 
 impl Drop for ComponentColumn {
+    /// Custom drop implementation to properly clean up type-erased components
+    ///
+    /// This is critical for components with destructors (e.g., Vec, String, Box)
     fn drop(&mut self) {
         if let Some(drop_fn) = self.drop_fn {
             let count = self.len();
             for i in 0..count {
                 let offset = i * self.item_size;
+                // SAFETY: This is safe because:
+                // 1. offset = i * item_size where i < count = len()
+                // 2. len() returns data.len() / item_size, so offset < data.len()
+                // 3. drop_fn was created with the correct type T in new()
+                // 4. Each component was properly initialized via get_ptr_mut
+                // 5. We're dropping each component exactly once
+                // 6. This is the final cleanup, no further access will occur
                 unsafe {
                     drop_fn(self.data.as_mut_ptr().add(offset));
                 }

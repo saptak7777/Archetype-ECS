@@ -122,6 +122,12 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         while self.archetype_index < self.archetypes.len() {
             let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
+            // SAFETY: This is safe because:
+            // 1. archetype_ptr comes from world.archetype_ptr_mut() which returns valid pointers
+            // 2. The pointer is valid for the lifetime 'w (tied to world borrow)
+            // 3. No other code is mutating the archetype list during iteration
+            // 4. NonNull guarantees the pointer is non-null
+            // 5. The archetype exists for the duration of the query
             let archetype = unsafe { &mut *archetype_ptr };
 
             if self.entity_index < archetype.len() {
@@ -156,10 +162,12 @@ where
         let mut count = 0;
 
         let current_ptr = self.archetypes[self.archetype_index].as_ptr();
+        // SAFETY: Pointer is valid for 'w lifetime and comes from world.archetype_ptr_mut()
         let current = unsafe { &*current_ptr };
         count += current.len().saturating_sub(self.entity_index);
 
         for archetype_ptr in self.archetypes.iter().skip(self.archetype_index + 1) {
+            // SAFETY: All pointers in self.archetypes are valid for the query lifetime
             let archetype = unsafe { &*archetype_ptr.as_ptr() };
             count += archetype.len();
         }
@@ -229,15 +237,37 @@ impl_query_fetch_mut_tuple!(A, B);
 impl_query_fetch_mut_tuple!(A, B, C);
 impl_query_fetch_mut_tuple!(A, B, C, D);
 
+/// Safely borrow multiple mutable references to different columns
+///
+/// This function enables borrowing multiple component columns mutably at once,
+/// which is necessary for tuple queries like `(&mut Position, &mut Velocity)`.
+///
+/// # Safety Architecture
+///
+/// This function uses unsafe code to create multiple mutable references from a single
+/// slice, which normally violates Rust's aliasing rules. However, it's safe because:
+///
+/// ## Invariants
+/// 1. **Disjoint Indices**: The function verifies all indices are unique (no duplicates)
+/// 2. **Bounds Checking**: All indices are verified to be < columns.len()
+/// 3. **Sorted Access**: Indices are sorted to enable efficient duplicate detection
+/// 4. **Original Order**: Results are returned in the original request order
+///
+/// ## Why This Works
+/// - Each mutable reference points to a different element in the array
+/// - No two references alias the same memory
+/// - The borrow checker can't prove this statically, but we verify it at runtime
 fn borrow_columns_mut(
     columns: &mut [ComponentColumn],
     mut indices: Vec<(usize, usize)>,
 ) -> Option<Vec<&mut ComponentColumn>> {
+    // Sort by column index to enable duplicate detection
     indices.sort_by_key(|(idx, _)| *idx);
 
+    // Verify no duplicate indices (would create aliasing mutable references)
     for pair in indices.windows(2) {
         if pair[0].0 == pair[1].0 {
-            return None;
+            return None; // Duplicate index detected
         }
     }
 
@@ -247,8 +277,13 @@ fn borrow_columns_mut(
 
     for &(idx, original_pos) in &indices {
         if idx >= len {
-            return None;
+            return None; // Out of bounds
         }
+        // SAFETY: This is safe because:
+        // 1. idx < len (checked above)
+        // 2. base_ptr points to the start of a valid slice
+        // 3. add(idx) gives us a pointer to columns[idx]
+        // 4. We verified no duplicate indices, so each pointer is unique
         unsafe {
             ordered_ptrs[original_pos] = base_ptr.add(idx);
         }
@@ -257,7 +292,14 @@ fn borrow_columns_mut(
     Some(
         ordered_ptrs
             .into_iter()
-            .map(|ptr| unsafe { &mut *ptr })
+            .map(|ptr| {
+                // SAFETY: This is safe because:
+                // 1. ptr came from base_ptr.add(idx) where idx < len
+                // 2. All pointers are to different elements (no duplicates)
+                // 3. The lifetime is tied to the input &mut [ComponentColumn]
+                // 4. No aliasing occurs because indices are unique
+                unsafe { &mut *ptr }
+            })
             .collect(),
     )
 }

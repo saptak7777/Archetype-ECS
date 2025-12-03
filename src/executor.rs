@@ -143,6 +143,9 @@ impl Executor {
     }
 
     /// Execute systems in parallel where possible
+    ///
+    /// Uses the dependency graph to determine which systems can run concurrently.
+    /// See `ParallelExecutor::execute_stage` for detailed safety documentation.
     pub fn execute_frame_parallel(&mut self, world: &mut World) -> Result<()> {
         use crate::dependency::DependencyGraph;
         use crate::system::System;
@@ -168,6 +171,12 @@ impl Executor {
                         return Err(EcsError::SystemNotFound);
                     }
 
+                    // SAFETY: See ParallelExecutor::execute_stage for full safety documentation.
+                    // In summary:
+                    // 1. sys_idx is guaranteed valid by dependency graph
+                    // 2. Systems in same stage have non-conflicting access
+                    // 3. Each thread accesses a unique system index
+                    // 4. World access is disjoint (different components/archetypes)
                     let system =
                         unsafe { &mut *(systems_ptr as *mut Box<dyn System>).add(sys_idx) };
                     let world = unsafe { &mut *(world_ptr as *mut World) };
