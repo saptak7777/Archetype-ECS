@@ -143,11 +143,20 @@ impl Default for Stage {
     }
 }
 
+/// Ordering constraint for a system
+#[derive(Debug, Clone)]
+pub struct OrderingConstraint {
+    pub system_name: String,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+}
+
 /// Complete execution schedule
 pub struct Schedule {
     pub(crate) systems: Vec<BoxedSystem>,
     pub(crate) stages: Vec<Stage>,
     pub(crate) graph: Option<SystemGraph>,
+    pub(crate) ordering_constraints: Vec<OrderingConstraint>,
 }
 
 impl Default for Schedule {
@@ -163,6 +172,7 @@ impl Schedule {
             systems,
             stages: Vec::new(),
             graph: None,
+            ordering_constraints: Vec::new(),
         }
         .build()
     }
@@ -173,6 +183,7 @@ impl Schedule {
             systems: Vec::new(),
             stages: Vec::new(),
             graph: None,
+            ordering_constraints: Vec::new(),
         }
     }
 
@@ -185,6 +196,52 @@ impl Schedule {
     /// Add a system to the schedule definition
     pub fn add_system(&mut self, system: BoxedSystem) {
         self.systems.push(system);
+        self.invalidate();
+    }
+
+    /// Add a system that must run before another system
+    pub fn add_system_before(&mut self, system: BoxedSystem, before: &str) {
+        let system_name = system.name().to_string();
+        self.systems.push(system);
+
+        // Find or create constraint for this system
+        if let Some(constraint) = self
+            .ordering_constraints
+            .iter_mut()
+            .find(|c| c.system_name == system_name)
+        {
+            constraint.before.push(before.to_string());
+        } else {
+            self.ordering_constraints.push(OrderingConstraint {
+                system_name: system_name.clone(),
+                before: vec![before.to_string()],
+                after: Vec::new(),
+            });
+        }
+
+        self.invalidate();
+    }
+
+    /// Add a system that must run after another system
+    pub fn add_system_after(&mut self, system: BoxedSystem, after: &str) {
+        let system_name = system.name().to_string();
+        self.systems.push(system);
+
+        // Find or create constraint for this system
+        if let Some(constraint) = self
+            .ordering_constraints
+            .iter_mut()
+            .find(|c| c.system_name == system_name)
+        {
+            constraint.after.push(after.to_string());
+        } else {
+            self.ordering_constraints.push(OrderingConstraint {
+                system_name,
+                before: Vec::new(),
+                after: vec![after.to_string()],
+            });
+        }
+
         self.invalidate();
     }
 

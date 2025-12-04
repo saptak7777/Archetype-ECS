@@ -1,8 +1,7 @@
 use crate::error::Result;
 use crate::event_bus::{Event, EventSubscriber};
-use parking_lot::Mutex;
 use std::any::TypeId;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Logging subscriber that prints all events
 pub struct LoggingSubscriber;
@@ -77,7 +76,7 @@ impl CallbackSubscriber {
 
 impl EventSubscriber for CallbackSubscriber {
     fn on_event(&mut self, event: &dyn Event) -> Result<()> {
-        let callback = self.callback.lock();
+        let callback = self.callback.lock().unwrap();
         callback(event)
     }
 
@@ -108,7 +107,7 @@ impl FilteredSubscriber {
 impl EventSubscriber for FilteredSubscriber {
     fn on_event(&mut self, event: &dyn Event) -> Result<()> {
         if (self.filter)(event) {
-            let handler = self.handler.lock();
+            let handler = self.handler.lock().unwrap();
             handler(event)?;
         }
         Ok(())

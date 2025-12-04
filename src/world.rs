@@ -126,18 +126,27 @@ impl World {
         // Allocate row in archetype
         let row = archetype.allocate_row(entity, self.tick);
 
-        // Write component data
-        let mut ptrs = [std::ptr::null_mut(); MAX_BUNDLE_COMPONENTS];
-        let mut ptr_count = 0;
+        // OPTIMIZATION: Pre-calculate column indices to avoid hash lookups
+        let mut column_indices = [usize::MAX; MAX_BUNDLE_COMPONENTS];
+        let mut column_count = 0;
         for &type_id in type_ids.iter() {
-            if let Some(column) = archetype.get_column_mut(type_id) {
-                ptrs[ptr_count] = column.get_ptr_mut(row);
-                ptr_count += 1;
+            if let Some(idx) = archetype.column_index(type_id) {
+                column_indices[column_count] = idx;
+                column_count += 1;
+            }
+        }
+
+        // Write component data using pre-calculated indices
+        let mut ptrs = [std::ptr::null_mut(); MAX_BUNDLE_COMPONENTS];
+        for i in 0..column_count {
+            let col_idx = column_indices[i];
+            if let Some(column) = archetype.get_column_mut_by_index(col_idx) {
+                ptrs[i] = column.get_ptr_mut(row);
             }
         }
 
         unsafe {
-            bundle.write_components(&ptrs[..ptr_count]);
+            bundle.write_components(&ptrs[..column_count]);
         }
 
         // Update entity location
@@ -427,6 +436,16 @@ impl World {
         // Pre-allocate space in the archetype
         archetype.reserve_rows(count);
 
+        // OPTIMIZATION: Pre-calculate column indices to avoid hash lookups in the hot loop
+        let mut column_indices = [usize::MAX; MAX_BUNDLE_COMPONENTS];
+        let mut column_count = 0;
+        for &type_id in type_ids.iter() {
+            if let Some(idx) = archetype.column_index(type_id) {
+                column_indices[column_count] = idx;
+                column_count += 1;
+            }
+        }
+
         // Process each bundle
         for bundle in bundles {
             let entity = self.entity_locations.insert(EntityLocation {
@@ -442,18 +461,17 @@ impl World {
                 loc.archetype_row = row;
             }
 
-            // Write component data
+            // Write component data using pre-calculated indices
             let mut ptrs = [std::ptr::null_mut(); MAX_BUNDLE_COMPONENTS];
-            let mut ptr_count = 0;
-            for &type_id in type_ids.iter() {
-                if let Some(column) = archetype.get_column_mut(type_id) {
-                    ptrs[ptr_count] = column.get_ptr_mut(row);
-                    ptr_count += 1;
+            for i in 0..column_count {
+                let col_idx = column_indices[i];
+                if let Some(column) = archetype.get_column_mut_by_index(col_idx) {
+                    ptrs[i] = column.get_ptr_mut(row);
                 }
             }
 
             unsafe {
-                bundle.write_components(&ptrs[..ptr_count]);
+                bundle.write_components(&ptrs[..column_count]);
             }
 
             entity_ids.push(entity);
@@ -511,7 +529,7 @@ impl World {
         // We need to work around Rust's borrow checker here.
         // We can't borrow event_queue and observers simultaneously since both are in self.
         // Solution: drain events into a temporary vector, then process with unsafe aliasing.
-        let mut events_to_process = Vec::with_capacity(self.event_queue.len());
+        let mut events_to_process = Vec::new();
         while let Some(event) = self.event_queue.pop() {
             events_to_process.push(event);
         }
@@ -583,7 +601,7 @@ impl World {
 
     /// Get all descendants of entity
     pub fn get_descendants(&self, entity: EntityId) -> Result<Vec<EntityId>> {
-        let mut descendants = Vec::with_capacity(16); // Typical hierarchy depth
+        let mut descendants = Vec::new();
 
         self.traverse_hierarchy(entity, &mut |e| {
             if e != entity {

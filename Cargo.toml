@@ -30,8 +30,9 @@ criterion = "0.5"  # Benchmarking
 hecs = "0.10"
 
 [features]
-default = []
+default = ["parallel"]
 profiling = ["tracing", "tracing-appender", "tracing-subscriber"]
+parallel = []
 
 [[bench]]
 name = "ecs_bench"

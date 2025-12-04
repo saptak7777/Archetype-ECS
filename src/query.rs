@@ -80,6 +80,58 @@ where
             .map(|arch| arch.len())
             .sum()
     }
+
+    /// Parallel iteration over chunks
+    ///
+    /// This method allows processing entities in parallel chunks using Rayon.
+    /// Each chunk provides typed slice access to components for SIMD optimization.
+    #[cfg(feature = "parallel")]
+    pub fn par_for_each_chunk<F>(&mut self, func: F)
+    where
+        F: Fn(crate::archetype::ArchetypeChunkMut) + Send + Sync,
+    {
+        use rayon::prelude::*;
+
+        // 1. Get matched archetypes
+        let state = QueryState::<Q>::new(&*self.world);
+
+        // 2. Prepare for parallel execution
+        // We need to share the world pointer safely across threads
+        let world_ptr = self.world as *mut World as usize;
+
+        // 3. Iterate over archetypes in parallel
+        state.matched_archetypes.par_iter().for_each(|&arch_id| {
+            // SAFETY:
+            // 1. We have exclusive access to world in QueryMut
+            // 2. We are reading distinct archetypes (arch_id is unique)
+            // 3. We are not mutating the archetype list
+            // 4. The pointer is valid for the duration of this function
+            let world = unsafe { &mut *(world_ptr as *mut World) };
+
+            if let Some(archetype) = world.get_archetype_mut(arch_id) {
+                // Iterate over chunks of this archetype
+                // Note: We are processing chunks of the same archetype sequentially here,
+                // but archetypes are processed in parallel.
+                // To parallelize chunks within an archetype, we would need to collect them first.
+                // Given typical ECS usage (many archetypes or few large ones),
+                // we might want to flatten the parallelism.
+
+                // For now, let's process chunks sequentially within an archetype
+                // because `chunks_mut` returns an iterator (Vec::into_iter).
+
+                // Optimization: If archetype is large, we could use par_bridge() if we implemented it,
+                // but chunks_mut returns a Vec, so we CAN use par_iter() on it!
+
+                let chunks = archetype.chunks_mut(crate::archetype::DEFAULT_CHUNK_SIZE);
+
+                // Process chunks in parallel (nested parallelism)
+                // Rayon handles this well with work stealing
+                chunks.into_par_iter().for_each(|chunk| {
+                    func(chunk);
+                });
+            }
+        });
+    }
 }
 
 /// Immutable query iterator
