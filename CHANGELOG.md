@@ -5,6 +5,14 @@ All notable changes to Archetype ECS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2024-12-04
+
+### Fixed
+- **CRITICAL**: Fixed tuple query implementations to support `Entity` marker and mixed mutability
+  - `(Entity, &mut Component)` now works correctly
+  - `(&Position, &mut Velocity)` mixed read/write tuples now work
+- Changed tuple `QueryFetchMut` implementations from hardcoded `Component` bounds to generic `QueryFetchMut + QueryFilter` bounds
+
 ## [1.1.1] - 2024-12-04
 
 ### Added

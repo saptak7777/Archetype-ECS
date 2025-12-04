@@ -201,11 +201,6 @@ impl Archetype {
         self.components.get_mut(index)
     }
 
-    /// Get mutable slice of component columns
-    pub(crate) fn components_mut(&mut self) -> &mut [ComponentColumn] {
-        &mut self.components
-    }
-
     /// Get typed slice of components
     pub fn get_component_slice<T: Component>(&self) -> Option<&[T]> {
         let type_id = TypeId::of::<T>();

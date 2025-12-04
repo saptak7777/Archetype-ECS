@@ -18,7 +18,7 @@
 
 use std::any::TypeId;
 use std::marker::PhantomData;
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 
 #[cfg(feature = "profiling")]
 use tracing::info_span;
@@ -482,116 +482,89 @@ unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w T {
     }
 }
 
-// Manual implementations for tuple QueryFetchMut to avoid macro complexity with indices
+// Generic tuple implementations for QueryFetchMut
+// These use QueryFetchMut bounds, allowing mixed types like (Entity, &mut T), (&T, &mut U), etc.
 
-unsafe impl<'w, A: Component, B: Component> QueryFetchMut<'w> for (&'w mut A, &'w mut B) {
-    type Item = (&'w mut A, &'w mut B);
-    type State = (
-        <&'w mut A as QueryFetchMut<'w>>::State,
-        <&'w mut B as QueryFetchMut<'w>>::State,
-    );
+unsafe impl<'w, A: QueryFetchMut<'w>, B: QueryFetchMut<'w>> QueryFetchMut<'w> for (A, B)
+where
+    A: QueryFilter,
+    B: QueryFilter,
+{
+    type Item = (A::Item, B::Item);
+    type State = (A::State, B::State);
 
     fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
-        let idx_a = archetype.column_index(TypeId::of::<A>())?;
-        let idx_b = archetype.column_index(TypeId::of::<B>())?;
+        // SAFETY: We're getting non-overlapping mutable borrows through prepare
+        // Each component type gets its own column pointer
+        let ptr = archetype as *mut Archetype;
+        let state_a = A::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_b = B::prepare(unsafe { &mut *ptr }, current_tick)?;
+        Some((state_a, state_b))
+    }
 
-        let indices = vec![(idx_a, 0), (idx_b, 1)];
-        let columns = borrow_columns_mut(archetype.components_mut(), indices)?;
-        let mut iter = columns.into_iter();
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        Some((A::fetch(&mut state.0, row)?, B::fetch(&mut state.1, row)?))
+    }
+}
 
-        let col_a = iter.next()?;
-        let col_b = iter.next()?;
+unsafe impl<'w, A: QueryFetchMut<'w>, B: QueryFetchMut<'w>, C: QueryFetchMut<'w>> QueryFetchMut<'w>
+    for (A, B, C)
+where
+    A: QueryFilter,
+    B: QueryFilter,
+    C: QueryFilter,
+{
+    type Item = (A::Item, B::Item, C::Item);
+    type State = (A::State, B::State, C::State);
 
-        Some(((col_a, current_tick), (col_b, current_tick)))
+    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+        let ptr = archetype as *mut Archetype;
+        let state_a = A::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_b = B::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_c = C::prepare(unsafe { &mut *ptr }, current_tick)?;
+        Some((state_a, state_b, state_c))
     }
 
     unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
         Some((
-            <&'w mut A as QueryFetchMut<'w>>::fetch(&mut state.0, row)?,
-            <&'w mut B as QueryFetchMut<'w>>::fetch(&mut state.1, row)?,
+            A::fetch(&mut state.0, row)?,
+            B::fetch(&mut state.1, row)?,
+            C::fetch(&mut state.2, row)?,
         ))
     }
 }
 
-unsafe impl<'w, A: Component, B: Component, C: Component> QueryFetchMut<'w>
-    for (&'w mut A, &'w mut B, &'w mut C)
+unsafe impl<
+        'w,
+        A: QueryFetchMut<'w>,
+        B: QueryFetchMut<'w>,
+        C: QueryFetchMut<'w>,
+        D: QueryFetchMut<'w>,
+    > QueryFetchMut<'w> for (A, B, C, D)
+where
+    A: QueryFilter,
+    B: QueryFilter,
+    C: QueryFilter,
+    D: QueryFilter,
 {
-    type Item = (&'w mut A, &'w mut B, &'w mut C);
-    type State = (
-        <&'w mut A as QueryFetchMut<'w>>::State,
-        <&'w mut B as QueryFetchMut<'w>>::State,
-        <&'w mut C as QueryFetchMut<'w>>::State,
-    );
+    type Item = (A::Item, B::Item, C::Item, D::Item);
+    type State = (A::State, B::State, C::State, D::State);
 
     fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
-        let idx_a = archetype.column_index(TypeId::of::<A>())?;
-        let idx_b = archetype.column_index(TypeId::of::<B>())?;
-        let idx_c = archetype.column_index(TypeId::of::<C>())?;
-
-        let indices = vec![(idx_a, 0), (idx_b, 1), (idx_c, 2)];
-        let columns = borrow_columns_mut(archetype.components_mut(), indices)?;
-        let mut iter = columns.into_iter();
-
-        let col_a = iter.next()?;
-        let col_b = iter.next()?;
-        let col_c = iter.next()?;
-
-        Some((
-            (col_a, current_tick),
-            (col_b, current_tick),
-            (col_c, current_tick),
-        ))
+        let ptr = archetype as *mut Archetype;
+        let state_a = A::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_b = B::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_c = C::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_d = D::prepare(unsafe { &mut *ptr }, current_tick)?;
+        Some((state_a, state_b, state_c, state_d))
     }
 
     unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
         Some((
-            <&'w mut A as QueryFetchMut<'w>>::fetch(&mut state.0, row)?,
-            <&'w mut B as QueryFetchMut<'w>>::fetch(&mut state.1, row)?,
-            <&'w mut C as QueryFetchMut<'w>>::fetch(&mut state.2, row)?,
-        ))
-    }
-}
-
-unsafe impl<'w, A: Component, B: Component, C: Component, D: Component> QueryFetchMut<'w>
-    for (&'w mut A, &'w mut B, &'w mut C, &'w mut D)
-{
-    type Item = (&'w mut A, &'w mut B, &'w mut C, &'w mut D);
-    type State = (
-        <&'w mut A as QueryFetchMut<'w>>::State,
-        <&'w mut B as QueryFetchMut<'w>>::State,
-        <&'w mut C as QueryFetchMut<'w>>::State,
-        <&'w mut D as QueryFetchMut<'w>>::State,
-    );
-
-    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
-        let idx_a = archetype.column_index(TypeId::of::<A>())?;
-        let idx_b = archetype.column_index(TypeId::of::<B>())?;
-        let idx_c = archetype.column_index(TypeId::of::<C>())?;
-        let idx_d = archetype.column_index(TypeId::of::<D>())?;
-
-        let indices = vec![(idx_a, 0), (idx_b, 1), (idx_c, 2), (idx_d, 3)];
-        let columns = borrow_columns_mut(archetype.components_mut(), indices)?;
-        let mut iter = columns.into_iter();
-
-        let col_a = iter.next()?;
-        let col_b = iter.next()?;
-        let col_c = iter.next()?;
-        let col_d = iter.next()?;
-
-        Some((
-            (col_a, current_tick),
-            (col_b, current_tick),
-            (col_c, current_tick),
-            (col_d, current_tick),
-        ))
-    }
-
-    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
-        Some((
-            <&'w mut A as QueryFetchMut<'w>>::fetch(&mut state.0, row)?,
-            <&'w mut B as QueryFetchMut<'w>>::fetch(&mut state.1, row)?,
-            <&'w mut C as QueryFetchMut<'w>>::fetch(&mut state.2, row)?,
-            <&'w mut D as QueryFetchMut<'w>>::fetch(&mut state.3, row)?,
+            A::fetch(&mut state.0, row)?,
+            B::fetch(&mut state.1, row)?,
+            C::fetch(&mut state.2, row)?,
+            D::fetch(&mut state.3, row)?,
         ))
     }
 }
@@ -660,73 +633,6 @@ unsafe impl<'w, A: QueryFetch<'w>, B: QueryFetch<'w>, C: QueryFetch<'w>, D: Quer
             D::fetch(&state.3, row)?,
         ))
     }
-}
-
-/// Safely borrow multiple mutable references to different columns
-///
-/// This function enables borrowing multiple component columns mutably at once,
-/// which is necessary for tuple queries like `(&mut Position, &mut Velocity)`.
-///
-/// # Safety Architecture
-///
-/// This function uses unsafe code to create multiple mutable references from a single
-/// slice, which normally violates Rust's aliasing rules. However, it's safe because:
-///
-/// ## Invariants
-/// 1. **Disjoint Indices**: The function verifies all indices are unique (no duplicates)
-/// 2. **Bounds Checking**: All indices are verified to be < columns.len()
-/// 3. **Sorted Access**: Indices are sorted to enable efficient duplicate detection
-/// 4. **Original Order**: Results are returned in the original request order
-///
-/// ## Why This Works
-/// - Each mutable reference points to a different element in the array
-/// - No two references alias the same memory
-/// - The borrow checker can't prove this statically, but we verify it at runtime
-fn borrow_columns_mut(
-    columns: &mut [ComponentColumn],
-    mut indices: Vec<(usize, usize)>,
-) -> Option<Vec<&mut ComponentColumn>> {
-    // Sort by column index to enable duplicate detection
-    indices.sort_by_key(|(idx, _)| *idx);
-
-    // Verify no duplicate indices (would create aliasing mutable references)
-    for pair in indices.windows(2) {
-        if pair[0].0 == pair[1].0 {
-            return None; // Duplicate index detected
-        }
-    }
-
-    let len = columns.len();
-    let base_ptr = columns.as_mut_ptr();
-    let mut ordered_ptrs = vec![ptr::null_mut(); indices.len()];
-
-    for &(idx, original_pos) in &indices {
-        if idx >= len {
-            return None; // Out of bounds
-        }
-        // SAFETY: This is safe because:
-        // 1. idx < len (checked above)
-        // 2. base_ptr points to the start of a valid slice
-        // 3. add(idx) gives us a pointer to columns[idx]
-        // 4. We verified no duplicate indices, so each pointer is unique
-        unsafe {
-            ordered_ptrs[original_pos] = base_ptr.add(idx);
-        }
-    }
-
-    Some(
-        ordered_ptrs
-            .into_iter()
-            .map(|ptr| {
-                // SAFETY: This is safe because:
-                // 1. ptr came from base_ptr.add(idx) where idx < len
-                // 2. All pointers are to different elements (no duplicates)
-                // 3. The lifetime is tied to the input &mut [ComponentColumn]
-                // 4. No aliasing occurs because indices are unique
-                unsafe { &mut *ptr }
-            })
-            .collect(),
-    )
 }
 
 /// Cached query state
