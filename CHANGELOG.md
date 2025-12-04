@@ -5,6 +5,14 @@ All notable changes to Archetype ECS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2024-12-04
+
+### Fixed
+- **CRITICAL**: Fixed `world.despawn(entity)` to be **immediate** instead of deferred
+  - Previously, `despawn` only queued the entity for removal, requiring a manual `flush_removals()` call
+  - Now, `despawn` removes the entity immediately, matching user expectations
+  - Added `despawn_deferred` for the old behavior (queue for later removal)
+
 ## [1.1.2] - 2024-12-04
 
 ### Fixed

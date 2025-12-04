@@ -168,7 +168,7 @@ impl World {
     ///
     /// Entities are not immediately removed to avoid issues during iteration.
     /// Call `flush_removals()` to process the removal queue.
-    pub fn despawn(&mut self, entity: EntityId) -> Result<()> {
+    pub fn despawn_deferred(&mut self, entity: EntityId) -> Result<()> {
         // Validate entity exists
         if !self.entity_locations.contains_key(entity) {
             return Err(EcsError::EntityNotFound);
@@ -179,8 +179,10 @@ impl World {
         Ok(())
     }
 
-    /// Despawn entity immediately (use with caution during iteration)
-    pub fn despawn_immediate(&mut self, entity: EntityId) -> Result<()> {
+    /// Despawn entity immediately
+    ///
+    /// Removes the entity and all its components from the world.
+    pub fn despawn(&mut self, entity: EntityId) -> Result<()> {
         if let Some(location) = self.entity_locations.remove(entity) {
             let archetype = &mut self.archetypes[location.archetype_id];
             unsafe {
@@ -208,7 +210,7 @@ impl World {
         // Process all queued removals
         for entity in entities_to_remove {
             // Ignore errors for already-removed entities
-            let _ = self.despawn_immediate(entity);
+            let _ = self.despawn(entity);
         }
         Ok(())
     }

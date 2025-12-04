@@ -8,7 +8,7 @@ A high-performance Entity Component System (ECS) library for Rust.
 
 ```toml
 [dependencies]
-archetype_ecs = "1.1.2"
+archetype_ecs = "1.1.3"
 ```
 
 ## Quick Start
