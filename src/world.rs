@@ -70,6 +70,9 @@ pub struct World {
 
     /// Deferred removal queue for safe entity deletion during iteration
     removal_queue: Vec<EntityId>,
+
+    /// Typed resources (singletons) for global state
+    resources: AHashMap<TypeId, Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl World {
@@ -88,6 +91,7 @@ impl World {
             resource_manager: crate::resources::ResourceManager::default(),
             tick: 1, // Start at 1 so change detection works on first query
             removal_queue: Vec::new(),
+            resources: AHashMap::new(),
         };
 
         // Create empty archetype for entities with no components
@@ -363,6 +367,52 @@ impl World {
             archetype_memory,
             total_memory: archetype_memory + entity_index_memory,
         }
+    }
+
+    // ========== Resource API (Singleton State) ==========
+
+    /// Insert a resource (singleton) into the world
+    ///
+    /// Resources are typed singletons that can be accessed globally.
+    /// If a resource of this type already exists, it will be replaced.
+    ///
+    /// # Example
+    /// ```ignore
+    /// world.insert_resource(Time { delta: 0.016 });
+    /// ```
+    pub fn insert_resource<R: Send + Sync + 'static>(&mut self, resource: R) {
+        self.resources.insert(TypeId::of::<R>(), Box::new(resource));
+    }
+
+    /// Get an immutable reference to a resource
+    ///
+    /// Returns `None` if the resource doesn't exist.
+    pub fn resource<R: 'static>(&self) -> Option<&R> {
+        self.resources
+            .get(&TypeId::of::<R>())
+            .and_then(|r| r.downcast_ref())
+    }
+
+    /// Get a mutable reference to a resource
+    ///
+    /// Returns `None` if the resource doesn't exist.
+    pub fn resource_mut<R: 'static>(&mut self) -> Option<&mut R> {
+        self.resources
+            .get_mut(&TypeId::of::<R>())
+            .and_then(|r| r.downcast_mut())
+    }
+
+    /// Check if a resource exists
+    pub fn has_resource<R: 'static>(&self) -> bool {
+        self.resources.contains_key(&TypeId::of::<R>())
+    }
+
+    /// Remove a resource and return it
+    pub fn remove_resource<R: 'static>(&mut self) -> Option<R> {
+        self.resources
+            .remove(&TypeId::of::<R>())
+            .and_then(|r| r.downcast().ok())
+            .map(|boxed| *boxed)
     }
 
     /// Get or create archetype with caching for common signatures

@@ -1,307 +1,225 @@
 # Archetype ECS
 
-A high-performance, production-ready Entity Component System (ECS) library for Rust, designed for game development and real-time simulations. Built with a focus on performance, ergonomics, and developer experience, Archetype ECS provides a robust foundation for building complex game engines and simulation systems.
+A high-performance Entity Component System (ECS) library for Rust.
 
-## 🚀 Key Features
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-- **Blazing Fast**: Optimized for high-performance with minimal overhead
-- **Parallel Processing**: Built-in support for parallel system execution
-- **Memory Efficient**: Smart memory management and cache-friendly design
-- **Type Safety**: Leverages Rust's type system for compile-time safety
-- **Extensible**: Easy to extend with custom components and systems
-- **Cross-Platform**: Works on all platforms supported by Rust
+## Installation
 
-## 🏎️ Performance Highlights
-
-| Operation | Performance | Description |
-|-----------|-------------|-------------|
-| **Query State Creation** | 34.7 ns | Extremely fast query construction |
-| **Cached Query (10k entities)** | 11.1 µs | Efficient iteration over components |
-| **Entity Lookup (100k entities)** | 133.2 µs | Fast entity component access |
-| **Entity Despawn (1k entities)** | 4.2 µs | Efficient entity cleanup |
-| **Archetype Management** | 58.5 µs | Optimized component storage |
-| **Entity Counting** | 163.2 ps | Near-instant entity management |
-
-## ⚡ Parallel Execution
-
-- **10.2x** speedup with parallel processing
-- **15%** faster than sequential execution
-- Efficient work-stealing scheduler
-- Automatic load balancing
-
-*Benchmarks measured on Intel i7-10700K, 32GB RAM, Release builds*
-
-🚀 Quick Start
-Installation
-Add to your 
-Cargo.toml
-:
-
-toml
+```toml
 [dependencies]
-archetype_ecs = "0.1.0"
-Basic Usage
-rust
+archetype_ecs = "1.1.1"
+```
+
+## Quick Start
+
+```rust
 use archetype_ecs::prelude::*;
 
-// Define components
-#[derive(Component)]
-struct Position {
-    x: f32,
-    y: f32,
+// Components are plain structs
+struct Position { x: f32, y: f32 }
+struct Velocity { dx: f32, dy: f32 }
+
+fn main() -> Result<()> {
+    let mut world = World::new();
+    
+    // Spawn entities
+    for i in 0..1000 {
+        world.spawn((
+            Position { x: i as f32, y: 0.0 },
+            Velocity { dx: 1.0, dy: 0.0 },
+        ))?;
+    }
+    
+    // Query and update components
+    for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
+        pos.x += vel.dx;
+        pos.y += vel.dy;
+    }
+    
+    Ok(())
+}
+```
+
+## Querying Entities
+
+### Basic Queries
+
+```rust
+// Mutable query - use .iter() or IntoIterator
+let mut query = world.query_mut::<(&mut Position, &Velocity)>();
+for (pos, vel) in query.iter() {
+    pos.x += vel.dx;
 }
 
-#[derive(Component)]
-struct Velocity {
-    dx: f32,
-    dy: f32,
-}
-
-// Create world
-let mut world = World::new();
-
-// Spawn entities
-for i in 0..1000 {
-    world.spawn((
-        Position { x: i as f32, y: 0.0 },
-        Velocity { dx: 1.0, dy: 0.0 },
-    ))?;
-}
-
-// Query and update components
+// Or directly (IntoIterator)
 for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
     pos.x += vel.dx;
-    pos.y += vel.dy;
 }
-📚 Features
-Core ECS
-Fast Queries: Optimized archetype-based storage with caching
-Component Management: Add, remove, and modify components efficiently
-Entity Lifecycle: Spawn, despawn, and track entities
-Memory Efficient: Minimal overhead with smart memory management
-Advanced Features
-Change Detection
-rust
-// Only process entities that changed since last frame
-for position in world.query_mut::<Changed<Position>>() {
-    // Handle modified positions
-}
+```
 
-// Only process entities that just gained a component
-for velocity in world.query_mut::<Added<Velocity>>() {
-    // Initialize new velocity components
-}
-Hierarchical Scenes
-rust
-use archetype_ecs::hierarchy::{Parent, Children};
+### Getting Entity IDs
 
-// Create parent-child relationships
-let parent = world.spawn((
-    Transform::default(),
-    Children::default(),
-))?;
+Use the `Entity` marker to get entity IDs during iteration:
 
-let child = world.spawn((
-    Transform::default(),
-    Parent(parent),
-))?;
+```rust
+use archetype_ecs::prelude::*;
 
-// Update transforms recursively
-world.update_hierarchy()?;
-Event System
-rust
-#[derive(Event)]
-struct CollisionEvent {
-    entity_a: EntityId,
-    entity_b: EntityId,
+let mut to_delete = Vec::new();
+
+for (entity, health) in world.query_mut::<(Entity, &Health)>() {
+    if health.current <= 0.0 {
+        to_delete.push(entity);  // Track entity for deletion
+    }
 }
 
-// Publish events
-world.publish(CollisionEvent { entity_a, entity_b });
+// Delete entities after iteration
+for entity in to_delete {
+    world.despawn(entity)?;
+}
+```
 
-// Subscribe to events
-world.subscribe_to::<CollisionEvent>(|event| {
-    println!("Collision between {:?} and {:?}", 
-             event.entity_a, event.entity_b);
-});
-Serialization
-rust
-// Save world state
-world.save_to_file("savegame.json")?;
+### Mixed Mutability
 
-// Load world state
-world.load_from_file("savegame.json")?;
+Read some components while writing others:
 
-// Binary format for better performance
-world.save_to_file_with_format("savegame.bin", 
-                               SerializationFormat::Binary)?;
-Resource Management
-rust
-#[derive(Resource)]
-struct GameSettings {
-    volume: f32,
-    difficulty: u32,
+```rust
+// Read Position, write Velocity
+for (pos, vel) in world.query_mut::<(&Position, &mut Velocity)>() {
+    vel.dx = -pos.x * 0.1;  // Use pos to calculate new velocity
+}
+```
+
+### Direct Component Access
+
+Access components on a specific entity:
+
+```rust
+// Immutable access
+if let Some(pos) = world.get_component::<Position>(entity) {
+    println!("Position: ({}, {})", pos.x, pos.y);
 }
 
-// Insert resources
-world.insert_resource(GameSettings {
-    volume: 0.8,
-    difficulty: 2,
-});
+// Mutable access
+if let Some(pos) = world.get_component_mut::<Position>(entity) {
+    pos.x += 10.0;
+}
+```
 
-// Access resources
-let settings = world.get_resource::<GameSettings>()?;
-🏗️ Architecture
-World
-The central container for all ECS data:
+## Resources (Global State)
 
-rust
-let mut world = World::new();
+Resources are typed singletons for global state:
 
-// Get statistics
-println!("Entities: {}", world.entity_count());
-println!("Archetypes: {}", world.archetype_count());
-println!("Memory: {:?}", world.memory_stats());
-Queries
-Type-safe component access with filtering:
+```rust
+struct GameTime { delta: f32, elapsed: f32 }
 
-rust
-// Basic query
-for (pos, vel) in world.query_mut::<(&Position, &Velocity)>() {
-    // Read-only access
+// Insert resource
+world.insert_resource(GameTime { delta: 0.016, elapsed: 0.0 });
+
+// Read resource
+if let Some(time) = world.resource::<GameTime>() {
+    println!("Elapsed: {}", time.elapsed);
 }
 
-// Mutable query
-for (pos, vel) in world.query_mut::<(&mut Position, &mut Velocity)>() {
-    // Mutable access
+// Mutate resource
+if let Some(time) = world.resource_mut::<GameTime>() {
+    time.elapsed += time.delta;
 }
+```
 
-// With filters
-for entity in world.query_mut::<With<Health>>() {
-    // Only entities with Health component
-}
+## Query Filters
 
-// Complex queries
-for (pos, vel) in world.query_mut::<(
-    &mut Position, 
-    &Velocity, 
-    Without<Static>
-)>() {
-    // Entities with Position and Velocity but not Static
-}
-Systems
-Modular game logic:
+Filter entities by component presence:
 
-rust
-use archetype_ecs::system::System;
+```rust
+use archetype_ecs::query::{With, Without, Changed};
 
-struct MovementSystem;
+// Only entities WITH a Visible component
+let query = Query::<&Position, With<Visible>>::new(&world);
+for pos in query.iter() { /* ... */ }
 
-impl System for MovementSystem {
-    type Access = (
-        archetype_ecs::system::Write<Position>,
-        archetype_ecs::system::Read<Velocity>,
-    );
+// Only entities WITHOUT a Dead component
+let query = Query::<&Position, Without<Dead>>::new(&world);
+
+// Only entities where Position changed this frame
+let query = Query::<&Position, Changed<Position>>::new(&world);
+```
+
+## Systems & Scheduling
+
+```rust
+use archetype_ecs::{System, SystemAccess};
+use std::any::TypeId;
+
+struct PhysicsSystem;
+
+impl System for PhysicsSystem {
+    fn name(&self) -> &'static str { "PhysicsSystem" }
+    
+    fn access(&self) -> SystemAccess {
+        let mut access = SystemAccess::empty();
+        access.writes.push(TypeId::of::<Position>());
+        access.reads.push(TypeId::of::<Velocity>());
+        access
+    }
     
     fn run(&mut self, world: &mut World) -> Result<()> {
         for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
-            pos.x += vel.dx * 0.016; // 60 FPS delta
-            pos.y += vel.dy * 0.016;
+            pos.x += vel.dx;
+            pos.y += vel.dy;
         }
         Ok(())
     }
 }
-🔄 Parallel Execution
-Automatic Dependency Resolution
-The ECS automatically resolves system dependencies using topological sorting:
+```
 
-rust
+### Parallel Execution
+
+```rust
+use archetype_ecs::parallel::ParallelExecutor;
+
+let systems: Vec<Box<dyn System>> = vec![
+    Box::new(PhysicsSystem),
+    Box::new(RenderSystem),
+];
+
 let mut executor = ParallelExecutor::new(systems);
 executor.execute_parallel(&mut world)?;
-Priority-Based Task Scheduling
-Systems are scheduled based on priority and cost estimation:
+```
 
-Critical: On critical path
-High: Heavy computation systems
-Normal: Default priority
-Low: Lightweight systems
-Work-Stealing Execution
-Uses Rayon's work-stealing pool for optimal CPU utilization:
+## SIMD & Chunk Processing
 
-Automatic load balancing
-Dynamic work distribution
-25% faster parallel execution
-📈 Performance Tips
-1. Use Cached Queries
-rust
-// Good for one-off queries
-for pos in world.query_mut::<&Position>() { }
+Process entities in parallel with SIMD-friendly access:
 
-// Better for repeated queries
-let mut query = QueryState::<&Position>::new(&world);
-for _ in 0..1000 {
-    for pos in query.iter(&world) { }
-}
-2. Batch Operations
-rust
-// Spawn multiple entities efficiently
-let entities = world.spawn_batch((0..1000).map(|i| (
-    Position { x: i as f32, y: 0.0 },
-    Velocity { dx: 1.0, dy: 0.0 },
-)))?;
-3. Component Layout
-Group frequently accessed components together
-Keep component bundles small (≤8 components for optimal performance)
-Use #[repr(C)] for predictable memory layout
-🔧 Advanced Usage
-Custom Components
-rust
-#[derive(Component, Debug, Clone)]
-struct Health {
-    current: f32,
-    max: f32,
-}
-
-impl Health {
-    fn take_damage(&mut self, amount: f32) -> bool {
-        self.current -= amount;
-        self.current <= 0.0
+```rust
+let mut query = world.query_mut::<&mut Position>();
+query.par_for_each_chunk(|mut chunk| {
+    if let Some(positions) = chunk.get_slice_mut::<Position>() {
+        for pos in positions.iter_mut() {
+            pos.x += 1.0;
+            pos.y += 1.0;
+        }
     }
-}
-Parallel Execution
-rust
-use archetype_ecs::executor::ParallelExecutor;
+});
+```
 
-let mut executor = ParallelExecutor::new();
-executor.add_system(Box::new(MovementSystem));
-executor.add_system(Box::new(PhysicsSystem));
-executor.execute_parallel(&mut world)?;
-Profiling
-Enable profiling features:
+## Batch Operations
 
-toml
-[dependencies]
-archetype_ecs = { version = "0.1.0", features = ["profiling"] }
-📦 Examples
-Basic ECS - Simple entity and component usage
-Change Detection - Tracking component changes
-Hierarchy - Parent-child relationships
-Events - Event-driven architecture
-Serialization - Save/load game state
-Parallel Systems - Multi-threaded execution
+```rust
+// Spawn many entities efficiently
+let entities = world.spawn_batch((0..1000).map(|i| {
+    (Position { x: i as f32, y: 0.0 }, Velocity { dx: 1.0, dy: 0.0 })
+}))?;
+```
 
-# License
+## Performance
 
-Copyright 2024 Saptak Santra
+| Operation | Time | Scale |
+|-----------|------|-------|
+| Query Iteration | 11.1 µs | 10,000 entities |
+| Entity Spawn | 42.3 µs | 1,000 entities |
+| Parallel Execution | 3.1 ms | Multi-core |
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+## License
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+Copyright 2024 Saptak Santra. Licensed under Apache-2.0.

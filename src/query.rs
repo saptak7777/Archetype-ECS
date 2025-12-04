@@ -25,6 +25,7 @@ use tracing::info_span;
 
 use crate::archetype::{Archetype, ComponentColumn};
 use crate::component::Component;
+use crate::entity::EntityId;
 use crate::world::World;
 use smallvec::{smallvec, SmallVec};
 
@@ -131,6 +132,19 @@ where
                 });
             }
         });
+    }
+}
+
+impl<'w, Q> IntoIterator for QueryMut<'w, Q>
+where
+    Q: QueryFilter + QueryFetchMut<'w> + 'w,
+{
+    type Item = <Q as QueryFetchMut<'w>>::Item;
+    type IntoIter = QueryIterMut<'w, Q>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let state = QueryState::<Q>::new(&*self.world);
+        QueryIterMut::new(self.world, &state.matched_archetypes, 0, self.world.tick())
     }
 }
 
@@ -445,6 +459,26 @@ unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w mut T {
         let column = unsafe { &mut **column_ptr };
         column.set_changed_tick(row, *current_tick);
         column.get_mut::<T>(row)
+    }
+}
+
+/// QueryFetchMut for immutable reference - allows mixed mutability tuples
+/// Example: `world.query_mut::<(&Position, &mut Velocity)>()`
+unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w T {
+    type Item = &'w T;
+    type State = *const ComponentColumn;
+
+    fn prepare(archetype: &'w mut Archetype, _current_tick: u32) -> Option<Self::State> {
+        let type_id = TypeId::of::<T>();
+        archetype
+            .get_column(type_id)
+            .map(|col| col as *const ComponentColumn)
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        // SAFETY: The pointer is valid for the lifetime 'w
+        let column = unsafe { &**state };
+        column.get::<T>(row)
     }
 }
 
@@ -1154,6 +1188,56 @@ impl<T: 'static> QueryFilter for Without<T> {
 
     fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
         smallvec![] // Without doesn't require component presence for storage access
+    }
+}
+
+/// Marker type for fetching EntityId in queries
+///
+/// Use this to access the entity ID during query iteration:
+/// ```ignore
+/// for (entity, health) in world.query_mut::<(Entity, &mut Health)>().iter() {
+///     if health.is_dead() {
+///         to_delete.push(entity);
+///     }
+/// }
+/// ```
+pub struct Entity;
+
+impl QueryFilter for Entity {
+    fn matches_archetype(_archetype: &Archetype) -> bool {
+        true // Entity always matches - all archetypes have entities
+    }
+
+    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
+        smallvec![] // Entity doesn't require specific components
+    }
+}
+
+unsafe impl<'w> QueryFetch<'w> for Entity {
+    type Item = EntityId;
+    type State = &'w [EntityId];
+
+    fn prepare(archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
+        Some(archetype.entities())
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        state.get(row).copied()
+    }
+}
+
+unsafe impl<'w> QueryFetchMut<'w> for Entity {
+    type Item = EntityId;
+    type State = *const [EntityId];
+
+    fn prepare(archetype: &'w mut Archetype, _current_tick: u32) -> Option<Self::State> {
+        Some(archetype.entities() as *const [EntityId])
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        // SAFETY: The pointer is valid for the lifetime 'w
+        let slice = unsafe { &**state };
+        slice.get(row).copied()
     }
 }
 
