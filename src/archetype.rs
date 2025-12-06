@@ -164,6 +164,13 @@ impl Archetype {
                 // 3. The data at last_idx was already moved (if row < last_idx)
                 column.data.set_len(last_idx * item_size);
             }
+            // Fix: Keep ticks in sync with entities using swap_remove
+            // We use simple swap_remove because the order doesn't matter (sparse set)
+            // matching the entity swap_remove logic.
+            if row < column.added_ticks.len() {
+                column.added_ticks.swap_remove(row);
+                column.changed_ticks.swap_remove(row);
+            }
         }
 
         // If we swapped someone in, return their entity so we can update their location
@@ -387,7 +394,17 @@ impl ComponentColumn {
     pub fn get_ptr_mut(&mut self, index: usize) -> *mut u8 {
         let offset = index * self.item_size;
         if offset + self.item_size > self.data.len() {
-            self.data.resize(offset + self.item_size, 0);
+            // OPTIMIZATION: Use reserve + set_len to avoid zero-initializing memory
+            // that we are about to overwrite anyway.
+            // SAFETY:
+            // 1. u8 is valid for any bit pattern, so uninitialized memory is "safe" for Vec<u8>
+            //    (though reading it is UB if not careful, but we just write to it).
+            // 2. We ensure capacity before setting length.
+            let required_len = offset + self.item_size;
+            if required_len > self.data.capacity() {
+                self.data.reserve(required_len - self.data.len());
+            }
+            unsafe { self.data.set_len(required_len) };
         }
         // SAFETY: This is safe because:
         // 1. offset is calculated as index * item_size

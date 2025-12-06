@@ -15,7 +15,7 @@ A high-performance Entity Component System (ECS) library for Rust.
 
 ```toml
 [dependencies]
-archetype_ecs = "1.1.4"
+archetype_ecs = "1.1.5"
 ```
 
 ## Quick Start
@@ -223,10 +223,12 @@ let entities = world.spawn_batch((0..1000).map(|i| {
 
 | Operation | Time | Scale |
 |-----------|------|-------|
-| Query Iteration (Cached) | 186 µs | 100,000 entities |
-| Query Iteration (SIMD) | 83 µs | 100,000 entities |
-| Entity Spawn | 4.2 ms | 100,000 entities |
-| Parallel Execution | 3.1 ms | Multi-core |
+| Query Iteration (Cached) | ~1.6 ns / entity | 100,000 entities |
+| Query Iteration (SIMD) | ~0.54 ns / entity | 100,000 entities |
+| Entity Spawn | ~86 ns / entity | 100,000 entities |
+| Parallel Execution | 3.1 ms (Total) | Multi-core |
+
+> **Test Environment**: Intel Core i5-11400F, Intel Arc A380, 16GB RAM. Benchmarks run on v1.1.5.
 
 ## License
 
