@@ -354,4 +354,50 @@ mod tests {
         let stage = Stage::new();
         assert_eq!(stage.systems.len(), 0);
     }
+
+    struct MockSystem;
+    impl crate::system::System for MockSystem {
+        fn run(&mut self, _world: &mut crate::World) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "MockSystem"
+        }
+        fn access(&self) -> crate::system::SystemAccess {
+            crate::system::SystemAccess {
+                reads: vec![],
+                writes: vec![],
+            }
+        }
+    }
+
+    #[test]
+    fn test_lazy_rebuild() {
+        let mut schedule = Schedule::new();
+        schedule.add_system(Box::new(MockSystem));
+
+        // Graph should be None (dirty) immediately after adding
+        assert!(
+            schedule.graph.is_none(),
+            "Graph should be None after add_system"
+        );
+
+        // Ensure built (simulating execute start)
+        schedule.ensure_built().expect("Failed to build");
+
+        // Graph should be Some
+        assert!(
+            schedule.graph.is_some(),
+            "Graph should be Some after ensure_built"
+        );
+
+        // Add another system
+        schedule.add_system(Box::new(MockSystem));
+
+        // Graph should be None again (invalidated)
+        assert!(
+            schedule.graph.is_none(),
+            "Graph should be invalidated after adding new system"
+        );
+    }
 }

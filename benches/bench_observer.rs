@@ -3,7 +3,9 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 #[derive(Clone, Copy, Debug)]
 struct Position {
+    #[allow(dead_code)]
     x: f32,
+    #[allow(dead_code)]
     y: f32,
 }
 

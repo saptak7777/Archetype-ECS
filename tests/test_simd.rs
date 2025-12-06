@@ -1,5 +1,4 @@
 use archetype_ecs::World;
-use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Position {
@@ -63,7 +62,7 @@ fn test_simd_slice_access() {
     let mut query = world.query_mut::<&mut Position>();
     query.par_for_each_chunk(|mut chunk| {
         let positions = chunk.get_slice_mut::<Position>().unwrap();
-        assert!(positions.len() >= 1);
+        assert!(!positions.is_empty());
 
         // This slice can be used with SIMD operations
         // For example, using std::simd or manual SIMD intrinsics

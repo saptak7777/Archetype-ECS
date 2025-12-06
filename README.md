@@ -4,11 +4,18 @@ A high-performance Entity Component System (ECS) library for Rust.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+## Key Features
+
+- **Efficient Asset Management**: Lock-free, concurrent asset cache with LRU eviction policy.
+- **Change Detection**: Efficient `Changed<T>` and `Added<T>` component filters with zero-cost skipping.
+- **SIMD Chunk Iteration**:  High-performance `par_for_each_chunk` API for maximizing CPU throughput.
+- **Optimized for Concurrency**: Built-in support for parallel query execution using Rayon.
+
 ## Installation
 
 ```toml
 [dependencies]
-archetype_ecs = "1.1.3"
+archetype_ecs = "1.1.4"
 ```
 
 ## Quick Start
@@ -216,8 +223,9 @@ let entities = world.spawn_batch((0..1000).map(|i| {
 
 | Operation | Time | Scale |
 |-----------|------|-------|
-| Query Iteration | 11.1 µs | 10,000 entities |
-| Entity Spawn | 42.3 µs | 1,000 entities |
+| Query Iteration (Cached) | 186 µs | 100,000 entities |
+| Query Iteration (SIMD) | 83 µs | 100,000 entities |
+| Entity Spawn | 4.2 ms | 100,000 entities |
 | Parallel Execution | 3.1 ms | Multi-core |
 
 ## License

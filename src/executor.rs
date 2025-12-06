@@ -106,6 +106,7 @@ impl Executor {
 
     /// Execute one frame
     pub fn execute_frame(&mut self, world: &mut World) -> Result<()> {
+        world.increment_tick();
         self.schedule.ensure_built()?;
         // Collect stage plan to avoid borrow checker issues
         let stage_plan: Vec<Vec<SystemId>> = self
@@ -153,6 +154,7 @@ impl Executor {
     /// Uses the dependency graph to determine which systems can run concurrently.
     /// See `ParallelExecutor::execute_stage` for detailed safety documentation.
     pub fn execute_frame_parallel(&mut self, world: &mut World) -> Result<()> {
+        world.increment_tick();
         use crate::dependency::DependencyGraph;
         use crate::system::System;
         use rayon::prelude::*;

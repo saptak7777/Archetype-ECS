@@ -73,6 +73,10 @@ pub struct World {
 
     /// Typed resources (singletons) for global state
     resources: AHashMap<TypeId, Box<dyn std::any::Any + Send + Sync>>,
+
+    /// Query result cache to avoid O(n) archetype scanning
+    /// Maps generic Query type ID to QueryState
+    query_cache: AHashMap<crate::query::QuerySignature, crate::query::CachedQueryResult>,
 }
 
 impl World {
@@ -92,11 +96,22 @@ impl World {
             tick: 1, // Start at 1 so change detection works on first query
             removal_queue: Vec::new(),
             resources: AHashMap::new(),
+            query_cache: AHashMap::new(),
         };
 
         // Create empty archetype for entities with no components
         world.get_or_create_archetype(&[]); // FIXED: Pass vec directly
         world
+    }
+
+    /// Get current world tick
+    pub fn tick(&self) -> u32 {
+        self.tick
+    }
+
+    /// Increment world tick (start of frame)
+    pub fn increment_tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
     }
 
     /// Spawn entity with components
@@ -120,7 +135,8 @@ impl World {
         #[cfg(feature = "profiling")]
         let _span_guard = span.enter();
 
-        // Get or create archetype for this component set, registering component columns only once
+        // Get or create archetype for this component set
+        // Note: signature sorting happens inside get_or_create_archetype_with
         let archetype_id = self.get_or_create_archetype_with(&type_ids, |archetype| {
             B::register_components(archetype);
             archetype.mark_columns_initialized();
@@ -262,7 +278,7 @@ impl World {
     {
         let location = self.entity_locations.get(entity)?;
         let archetype = self.archetypes.get_mut(location.archetype_id)?;
-        let mut state = Q::prepare(archetype, self.tick)?;
+        let mut state = Q::prepare(archetype, 0, self.tick)?;
         unsafe { Q::fetch(&mut state, location.archetype_row) }
     }
 
@@ -272,6 +288,26 @@ impl World {
         Q: QueryFilter + QueryFetchMut<'w>,
     {
         QueryMut::new(self)
+    }
+
+    /// Get cached query results (matched archetypes)
+    ///
+    /// This method manages the query cache, updating it incrementally if needed.
+    /// It returns a vector of archetype indices that match the query.
+    pub(crate) fn get_cached_query_indices<Q: QueryFilter>(&mut self) -> Vec<usize> {
+        let signature = Q::signature();
+
+        // Fast path: existing state
+        if let Some(cached) = self.query_cache.get_mut(&signature) {
+            cached.update(&self.archetypes);
+            return cached.matched_archetypes.to_vec();
+        }
+
+        // Slow path: create new state
+        let cached = crate::query::CachedQueryResult::new(signature.clone(), &self.archetypes);
+        let indices = cached.matched_archetypes.to_vec();
+        self.query_cache.insert(signature, cached);
+        indices
     }
 
     /// Check if entity exists
@@ -349,6 +385,7 @@ impl World {
         self.archetypes.clear();
         self.archetype_index.clear();
         self.transitions.clear();
+        self.query_cache.clear();
 
         // Recreate empty archetype
         self.get_or_create_archetype(&[]); // FIXED
@@ -432,21 +469,25 @@ impl World {
     where
         F: FnOnce(&mut Archetype),
     {
+        // Sort signature to ensure canonical lookup (prevent archetype fragmentation)
+        // This ensures that (A, B) and (B, A) map to the same archetype logic
+        let mut sorted_signature = signature.clone();
+        sorted_signature.sort();
+
         // Try to find in archetype_index first (more direct than cache)
-        if let Some(&id) = self.archetype_index.get(signature) {
+        if let Some(&id) = self.archetype_index.get(&sorted_signature) {
             return id;
         }
 
         // Not found, create new archetype
         let id = self.archetypes.len();
 
-        // Create new archetype with the signature (move ownership)
-        let signature_vec: ArchetypeSignature = signature.iter().copied().collect();
-        let mut archetype = Archetype::new(signature_vec.clone());
+        // Create new archetype with the sorted signature
+        let mut archetype = Archetype::new(sorted_signature.clone());
         on_create(&mut archetype);
 
-        // Store in archetype index and cache
-        self.archetype_index.insert(signature_vec, id);
+        // Store in archetype index
+        self.archetype_index.insert(sorted_signature, id);
         self.archetypes.push(archetype);
 
         id
@@ -788,16 +829,6 @@ impl World {
     /// Get resource manager statistics
     pub fn get_resource_stats(&self) -> crate::resources::ResourceStats {
         self.resource_manager.get_stats()
-    }
-
-    /// Increment world tick
-    pub fn increment_tick(&mut self) {
-        self.tick += 1;
-    }
-
-    /// Get current world tick
-    pub fn tick(&self) -> u32 {
-        self.tick
     }
 }
 

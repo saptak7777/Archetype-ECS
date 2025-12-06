@@ -19,7 +19,8 @@ pub enum AssetEvent<T: Asset> {
 /// Asset server for managing asset loading and caching
 pub struct AssetServer {
     loaders: HashMap<String, Arc<dyn LoaderWrapper>>,
-    cache: Arc<RwLock<AssetCache>>,
+    // No RwLock needed - AssetCache is thread-safe
+    cache: Arc<AssetCache>,
     base_path: PathBuf,
     next_id: Arc<RwLock<u64>>,
     handle_to_path: Arc<RwLock<HashMap<u64, PathBuf>>>,
@@ -58,7 +59,7 @@ impl AssetServer {
     pub fn new<P: Into<PathBuf>>(base_path: P) -> Self {
         Self {
             loaders: HashMap::new(),
-            cache: Arc::new(RwLock::new(AssetCache::new(512 * 1024 * 1024))), // 512MB default
+            cache: Arc::new(AssetCache::new(512 * 1024 * 1024)), // 512MB default
             base_path: base_path.into(),
             next_id: Arc::new(RwLock::new(1)),
             handle_to_path: Arc::new(RwLock::new(HashMap::new())),
@@ -106,9 +107,8 @@ impl AssetServer {
             id
         };
 
-        // Store in cache
-        let mut cache = self.cache.write();
-        cache.insert(id, *asset);
+        // Store in cache (lock-free insert)
+        self.cache.insert(id, *asset);
 
         // Track path
         self.handle_to_path.write().insert(id, path.to_path_buf());
@@ -118,14 +118,12 @@ impl AssetServer {
 
     /// Get a loaded asset
     pub fn get<T: Asset>(&self, handle: AssetHandle<T>) -> Option<Arc<RwLock<T>>> {
-        let mut cache = self.cache.write();
-        cache.get(handle.id())
+        self.cache.get(handle.id())
     }
 
     /// Unload an asset
     pub fn unload<T: Asset>(&self, handle: AssetHandle<T>) -> bool {
-        let mut cache = self.cache.write();
-        let removed = cache.remove(handle.id());
+        let removed = self.cache.remove(handle.id());
         if removed {
             self.handle_to_path.write().remove(&handle.id());
         }
@@ -133,24 +131,24 @@ impl AssetServer {
     }
 
     /// Get cache statistics
-    pub fn cache_stats(&self) -> crate::assets::cache::CacheStats {
-        self.cache.read().stats().clone()
+    pub fn cache_stats(&self) -> crate::assets::cache::CacheStatsSnapshot {
+        self.cache.stats_snapshot()
     }
 
     /// Get memory usage
     pub fn memory_usage(&self) -> usize {
-        self.cache.read().memory_usage()
+        self.cache.memory_usage()
     }
 
     /// Clear all cached assets
     pub fn clear_cache(&self) {
-        self.cache.write().clear();
+        self.cache.clear();
         self.handle_to_path.write().clear();
     }
 
     /// Get number of loaded assets
     pub fn loaded_count(&self) -> usize {
-        self.cache.read().len()
+        self.cache.len()
     }
 }
 
@@ -179,5 +177,32 @@ mod tests {
         server.register_loader(TextLoader);
 
         assert_eq!(server.loaders.len(), 8); // bin, dat, json, txt, md, toml, yaml, yml
+    }
+
+    #[test]
+    fn test_concurrent_loads() {
+        // Let's test the cache directly since AssetServer wraps it
+        let cache = Arc::new(crate::assets::AssetCache::new(1024));
+
+        let mut handles = vec![];
+        for i in 0..10 {
+            let c = cache.clone();
+            handles.push(std::thread::spawn(move || {
+                struct MockAsset(#[allow(dead_code)] u64);
+                impl Asset for MockAsset {
+                    fn memory_size(&self) -> usize {
+                        10
+                    }
+                }
+                c.get_or_load(i % 3, || MockAsset(i % 3));
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(cache.len(), 3);
+        assert!(cache.stats_snapshot().hits + cache.stats_snapshot().misses >= 10);
     }
 }

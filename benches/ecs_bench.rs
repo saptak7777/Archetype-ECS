@@ -9,7 +9,7 @@
 //! - Entity lookup
 //! - Archetype operations
 
-use archetype_ecs::{QueryState, World as AaaWorld};
+use archetype_ecs::{archetype::Archetype, QueryState, World as AaaWorld};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use hecs::World as HecsWorld;
 
@@ -247,6 +247,33 @@ fn bench_spawn_large(c: &mut Criterion) {
                             Health(100),
                         ));
                     }
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("aaa_spawn_batch_with_3_components", count),
+            count,
+            |b, &count| {
+                b.iter(|| {
+                    let mut world = AaaWorld::new();
+                    let bundles = (0..count).map(|i| {
+                        (
+                            Position {
+                                x: i as f32,
+                                y: 0.0,
+                                z: 0.0,
+                            },
+                            Velocity {
+                                x: 1.0,
+                                y: 0.0,
+                                z: 0.0,
+                            },
+                            Health(100),
+                        )
+                    });
+                    // Measure batch spawn
+                    let _ = world.spawn_batch(bundles);
                 });
             },
         );
@@ -530,9 +557,9 @@ fn bench_query_creation(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("aaa_query_iteration_cached_10k", |b| {
+    group.bench_function("aaa_query_iteration_cached_100k", |b| {
         let mut world = AaaWorld::new();
-        for i in 0..10_000 {
+        for i in 0..100_000 {
             let _ = world.spawn((
                 Position {
                     x: i as f32,
@@ -548,14 +575,59 @@ fn bench_query_creation(c: &mut Criterion) {
             ));
         }
 
-        let state = QueryState::<(&Position, &Velocity)>::new(&world);
+        // Initialize cache
+        let _ = world
+            .query_mut::<(&mut Position, &Velocity)>()
+            .iter()
+            .count();
 
         b.iter(|| {
-            let mut count = 0;
-            for _ in state.iter(&world, 0) {
-                count += 1;
+            for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
+                pos.x += vel.x;
             }
-            black_box(count);
+        });
+    });
+
+    group.bench_function("aaa_query_iteration_simd_100k", |b| {
+        let mut world = AaaWorld::new();
+        for i in 0..100_000 {
+            let _ = world.spawn((
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                Velocity {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                Health(100),
+            ));
+        }
+
+        b.iter(|| {
+            world
+                .query_mut::<(&mut Position, &Velocity)>()
+                .par_for_each_chunk(|chunk| {
+                    // SAFETY: We access disjoint components
+                    let archetype = chunk.archetype as *mut Archetype;
+                    let range = chunk.entity_range.clone();
+
+                    unsafe {
+                        if let (Some(all_pos), Some(all_vel)) = (
+                            (*archetype).get_component_slice_mut::<Position>(),
+                            (*archetype).get_component_slice::<Velocity>(),
+                        ) {
+                            let positions = &mut all_pos[range.clone()];
+                            let velocities = &all_vel[range];
+
+                            for (pos, vel) in positions.iter_mut().zip(velocities.iter()) {
+                                pos.x += vel.x;
+                            }
+                        }
+                    }
+                });
         });
     });
 

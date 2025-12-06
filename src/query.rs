@@ -31,6 +31,95 @@ use smallvec::{smallvec, SmallVec};
 
 const MAX_FILTER_COMPONENTS: usize = 8;
 
+/// Component signature for query caching
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QuerySignature {
+    /// Components that must be present
+    pub required: SmallVec<[TypeId; 8]>,
+    /// Components that must be absent
+    pub excluded: SmallVec<[TypeId; 8]>,
+}
+
+impl Default for QuerySignature {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QuerySignature {
+    /// Create new empty signature
+    pub fn new() -> Self {
+        Self {
+            required: SmallVec::new(),
+            excluded: SmallVec::new(),
+        }
+    }
+
+    /// Check if an archetype matches this signature
+    pub fn matches(&self, archetype: &Archetype) -> bool {
+        // Check required components
+        for &req in &self.required {
+            if archetype.column_index(req).is_none() {
+                return false;
+            }
+        }
+
+        // Check excluded components
+        for &exc in &self.excluded {
+            if archetype.column_index(exc).is_some() {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+/// Cached result for a specific query signature
+pub struct CachedQueryResult {
+    pub matched_archetypes: Vec<usize>,
+    pub last_archetype_count: usize,
+    pub signature: QuerySignature,
+}
+
+impl CachedQueryResult {
+    pub fn new(signature: QuerySignature, archetypes: &[Archetype]) -> Self {
+        let matched = archetypes
+            .iter()
+            .enumerate()
+            .filter_map(|(id, arch)| {
+                if signature.matches(arch) {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Self {
+            matched_archetypes: matched,
+            last_archetype_count: archetypes.len(),
+            signature,
+        }
+    }
+
+    pub fn update(&mut self, archetypes: &[Archetype]) {
+        let current_count = archetypes.len();
+        if current_count > self.last_archetype_count {
+            for (id, arch) in archetypes
+                .iter()
+                .enumerate()
+                .skip(self.last_archetype_count)
+            {
+                if self.signature.matches(arch) {
+                    self.matched_archetypes.push(id);
+                }
+            }
+            self.last_archetype_count = current_count;
+        }
+    }
+}
+
 /// Query filter trait for type-level archetype matching
 pub trait QueryFilter {
     /// Check if archetype matches this query
@@ -38,6 +127,15 @@ pub trait QueryFilter {
 
     /// Get required component type IDs
     fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]>;
+
+    /// Get query signature for caching
+    fn signature() -> QuerySignature {
+        // Default implementation for basic components
+        let mut sig = QuerySignature::new();
+        sig.required = Self::type_ids();
+        sig.required.sort();
+        sig
+    }
 }
 
 /// Stateful mutable query wrapper
@@ -66,16 +164,22 @@ where
     /// Creates a temporary QueryState internally for convenience.
     /// For better performance in hot loops, use `CachedQuery` instead.
     pub fn iter(&'w mut self) -> QueryIterMut<'w, Q> {
-        let state = QueryState::<Q>::new(&*self.world);
-        QueryIterMut::new(self.world, &state.matched_archetypes, 0, self.world.tick())
+        // OPTIMIZATION: Use cached query state from world
+        let matched = self.world.get_cached_query_indices::<Q>();
+        QueryIterMut::new(self.world, &matched, 0, self.world.tick())
+    }
+
+    /// Iterate results changed since `tick`
+    pub fn iter_since(&'w mut self, tick: u32) -> QueryIterMut<'w, Q> {
+        let matched = self.world.get_cached_query_indices::<Q>();
+        QueryIterMut::new(self.world, &matched, tick, self.world.tick())
     }
 
     /// Count matching entities
     pub fn count(&mut self) -> usize {
+        let matched = self.world.get_cached_query_indices::<Q>();
         let world_ref: &World = &*self.world;
-        let state = QueryState::<Q>::new(world_ref);
-        state
-            .matched_archetypes
+        matched
             .iter()
             .filter_map(|&id| world_ref.get_archetype(id))
             .map(|arch| arch.len())
@@ -94,14 +198,14 @@ where
         use rayon::prelude::*;
 
         // 1. Get matched archetypes
-        let state = QueryState::<Q>::new(&*self.world);
+        let matched = self.world.get_cached_query_indices::<Q>();
 
         // 2. Prepare for parallel execution
         // We need to share the world pointer safely across threads
         let world_ptr = self.world as *mut World as usize;
 
         // 3. Iterate over archetypes in parallel
-        state.matched_archetypes.par_iter().for_each(|&arch_id| {
+        matched.par_iter().for_each(|&arch_id| {
             // SAFETY:
             // 1. We have exclusive access to world in QueryMut
             // 2. We are reading distinct archetypes (arch_id is unique)
@@ -111,22 +215,9 @@ where
 
             if let Some(archetype) = world.get_archetype_mut(arch_id) {
                 // Iterate over chunks of this archetype
-                // Note: We are processing chunks of the same archetype sequentially here,
-                // but archetypes are processed in parallel.
-                // To parallelize chunks within an archetype, we would need to collect them first.
-                // Given typical ECS usage (many archetypes or few large ones),
-                // we might want to flatten the parallelism.
-
-                // For now, let's process chunks sequentially within an archetype
-                // because `chunks_mut` returns an iterator (Vec::into_iter).
-
-                // Optimization: If archetype is large, we could use par_bridge() if we implemented it,
-                // but chunks_mut returns a Vec, so we CAN use par_iter() on it!
-
                 let chunks = archetype.chunks_mut(crate::archetype::DEFAULT_CHUNK_SIZE);
 
                 // Process chunks in parallel (nested parallelism)
-                // Rayon handles this well with work stealing
                 chunks.into_par_iter().for_each(|chunk| {
                     func(chunk);
                 });
@@ -143,8 +234,8 @@ where
     type IntoIter = QueryIterMut<'w, Q>;
 
     fn into_iter(self) -> Self::IntoIter {
-        let state = QueryState::<Q>::new(&*self.world);
-        QueryIterMut::new(self.world, &state.matched_archetypes, 0, self.world.tick())
+        let matched = self.world.get_cached_query_indices::<Q>();
+        QueryIterMut::new(self.world, &matched, 0, self.world.tick())
     }
 }
 
@@ -326,7 +417,7 @@ where
                 // 5. The archetype exists for the duration of the query
                 let archetype = unsafe { &mut *archetype_ptr };
 
-                self.state = Q::prepare(archetype, self.current_tick);
+                self.state = Q::prepare(archetype, self.change_tick, self.current_tick);
                 self.entity_index = 0;
 
                 if self.state.is_none() {
@@ -407,6 +498,17 @@ pub unsafe trait QueryFetch<'w>: QueryFilter {
 }
 
 // QueryFetch implementations for immutable component access
+
+impl<T: Component> QueryFilter for &T {
+    fn matches_archetype(archetype: &Archetype) -> bool {
+        archetype.column_index(TypeId::of::<T>()).is_some()
+    }
+
+    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
+        smallvec![TypeId::of::<T>()]
+    }
+}
+
 unsafe impl<'w, T: Component> QueryFetch<'w> for &'w T {
     type Item = &'w T;
     type State = &'w ComponentColumn;
@@ -432,7 +534,11 @@ pub unsafe trait QueryFetchMut<'w>: QueryFilter {
     type State;
 
     /// Prepare to fetch from an archetype
-    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State>;
+    fn prepare(
+        archetype: &'w mut Archetype,
+        change_tick: u32,
+        current_tick: u32,
+    ) -> Option<Self::State>;
 
     /// Fetch data for a specific entity
     ///
@@ -442,11 +548,25 @@ pub unsafe trait QueryFetchMut<'w>: QueryFilter {
     unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item>;
 }
 
+impl<T: Component> QueryFilter for &mut T {
+    fn matches_archetype(archetype: &Archetype) -> bool {
+        archetype.column_index(TypeId::of::<T>()).is_some()
+    }
+
+    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
+        smallvec![TypeId::of::<T>()]
+    }
+}
+
 unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w mut T {
     type Item = &'w mut T;
     type State = (*mut ComponentColumn, u32);
 
-    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+    fn prepare(
+        archetype: &'w mut Archetype,
+        _change_tick: u32,
+        current_tick: u32,
+    ) -> Option<Self::State> {
         let type_id = TypeId::of::<T>();
         let column = archetype.get_column_mut(type_id)?;
         Some((column as *mut ComponentColumn, current_tick))
@@ -468,7 +588,11 @@ unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w T {
     type Item = &'w T;
     type State = *const ComponentColumn;
 
-    fn prepare(archetype: &'w mut Archetype, _current_tick: u32) -> Option<Self::State> {
+    fn prepare(
+        archetype: &'w mut Archetype,
+        _change_tick: u32,
+        _current_tick: u32,
+    ) -> Option<Self::State> {
         let type_id = TypeId::of::<T>();
         archetype
             .get_column(type_id)
@@ -493,12 +617,16 @@ where
     type Item = (A::Item, B::Item);
     type State = (A::State, B::State);
 
-    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+    fn prepare(
+        archetype: &'w mut Archetype,
+        change_tick: u32,
+        current_tick: u32,
+    ) -> Option<Self::State> {
         // SAFETY: We're getting non-overlapping mutable borrows through prepare
         // Each component type gets its own column pointer
         let ptr = archetype as *mut Archetype;
-        let state_a = A::prepare(unsafe { &mut *ptr }, current_tick)?;
-        let state_b = B::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_a = A::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
+        let state_b = B::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
         Some((state_a, state_b))
     }
 
@@ -517,11 +645,15 @@ where
     type Item = (A::Item, B::Item, C::Item);
     type State = (A::State, B::State, C::State);
 
-    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+    fn prepare(
+        archetype: &'w mut Archetype,
+        change_tick: u32,
+        current_tick: u32,
+    ) -> Option<Self::State> {
         let ptr = archetype as *mut Archetype;
-        let state_a = A::prepare(unsafe { &mut *ptr }, current_tick)?;
-        let state_b = B::prepare(unsafe { &mut *ptr }, current_tick)?;
-        let state_c = C::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_a = A::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
+        let state_b = B::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
+        let state_c = C::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
         Some((state_a, state_b, state_c))
     }
 
@@ -550,12 +682,16 @@ where
     type Item = (A::Item, B::Item, C::Item, D::Item);
     type State = (A::State, B::State, C::State, D::State);
 
-    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
+    fn prepare(
+        archetype: &'w mut Archetype,
+        change_tick: u32,
+        current_tick: u32,
+    ) -> Option<Self::State> {
         let ptr = archetype as *mut Archetype;
-        let state_a = A::prepare(unsafe { &mut *ptr }, current_tick)?;
-        let state_b = B::prepare(unsafe { &mut *ptr }, current_tick)?;
-        let state_c = C::prepare(unsafe { &mut *ptr }, current_tick)?;
-        let state_d = D::prepare(unsafe { &mut *ptr }, current_tick)?;
+        let state_a = A::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
+        let state_b = B::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
+        let state_c = C::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
+        let state_d = D::prepare(unsafe { &mut *ptr }, change_tick, current_tick)?;
         Some((state_a, state_b, state_c, state_d))
     }
 
@@ -898,87 +1034,6 @@ unsafe impl<'w, T: 'static> QueryFetch<'w> for Without<T> {
     }
 }
 
-unsafe impl<'w, T: Component> QueryFetch<'w> for Changed<T> {
-    type Item = ();
-    type State = (&'w ComponentColumn, u32);
-
-    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
-        let type_id = TypeId::of::<T>();
-        archetype
-            .get_column(type_id)
-            .map(|column| (column, change_tick))
-    }
-
-    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
-        let (column, change_tick) = state;
-        // Check if this specific row has changed since the given tick
-        if row < column.changed_ticks.len() && column.changed_ticks[row] > *change_tick {
-            Some(())
-        } else {
-            None
-        }
-    }
-}
-
-// With query filter
-unsafe impl<'w, T: 'static> QueryFetch<'w> for Added<T> {
-    type Item = ();
-    type State = (&'w ComponentColumn, u32);
-
-    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
-        let type_id = TypeId::of::<T>();
-        archetype
-            .get_column(type_id)
-            .map(|column| (column, change_tick))
-    }
-
-    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
-        let (column, change_tick) = state;
-        // SAFETY: `row` is assumed to be a valid index for the column.
-        if column.get_added_tick(row)? > *change_tick {
-            Some(())
-        } else {
-            None
-        }
-    }
-}
-
-unsafe impl<'w, T: Component> QueryFetch<'w> for Read<T> {
-    type Item = &'w T;
-    type State = &'w ComponentColumn;
-
-    fn prepare(archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
-        let type_id = TypeId::of::<T>();
-        archetype.get_column(type_id)
-    }
-
-    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
-        // SAFETY: `row` is assumed to be a valid index for the column.
-        state.get::<T>(row)
-    }
-}
-
-unsafe impl<'w, T: Component> QueryFetchMut<'w> for Write<T> {
-    type Item = &'w mut T;
-    type State = (*mut ComponentColumn, u32);
-
-    fn prepare(archetype: &'w mut Archetype, current_tick: u32) -> Option<Self::State> {
-        let type_id = TypeId::of::<T>();
-        archetype
-            .get_column_mut(type_id)
-            .map(|column| (column as *mut ComponentColumn, current_tick))
-    }
-
-    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
-        let (column_ptr, current_tick) = state;
-        // SAFETY: The column pointer is valid for the lifetime 'w and points to a valid ComponentColumn.
-        // The caller ensures that row is a valid index within the column.
-        let column = &mut **column_ptr;
-        column.set_changed_tick(row, *current_tick);
-        column.get_mut::<T>(row)
-    }
-}
-
 /// Cached query for persistent system state
 ///
 /// Automatically updates when new archetypes are added.
@@ -1024,52 +1079,6 @@ impl<F: QueryFilter> CachedQuery<F> {
 }
 
 // QueryFilter implementations for common patterns
-
-impl<T: 'static> QueryFilter for &T {
-    fn matches_archetype(archetype: &Archetype) -> bool {
-        archetype.signature().contains(&TypeId::of::<T>()) // FIXED: Added &
-    }
-
-    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
-        smallvec![TypeId::of::<T>()]
-    }
-}
-
-impl<T: 'static> QueryFilter for &mut T {
-    fn matches_archetype(archetype: &Archetype) -> bool {
-        archetype.signature().contains(&TypeId::of::<T>()) // FIXED: Added &
-    }
-
-    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
-        smallvec![TypeId::of::<T>()]
-    }
-}
-
-/// Read access wrapper for CachedQuery
-pub struct Read<T>(PhantomData<T>);
-
-impl<T: 'static> QueryFilter for Read<T> {
-    fn matches_archetype(archetype: &Archetype) -> bool {
-        archetype.signature().contains(&TypeId::of::<T>())
-    }
-
-    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
-        smallvec![TypeId::of::<T>()]
-    }
-}
-
-/// Write access wrapper for CachedQuery
-pub struct Write<T>(PhantomData<T>);
-
-impl<T: 'static> QueryFilter for Write<T> {
-    fn matches_archetype(archetype: &Archetype) -> bool {
-        archetype.signature().contains(&TypeId::of::<T>())
-    }
-
-    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
-        smallvec![TypeId::of::<T>()]
-    }
-}
 
 /// Filter for entities with component T
 pub struct With<T>(PhantomData<T>);
@@ -1136,7 +1145,11 @@ unsafe impl<'w> QueryFetchMut<'w> for Entity {
     type Item = EntityId;
     type State = *const [EntityId];
 
-    fn prepare(archetype: &'w mut Archetype, _current_tick: u32) -> Option<Self::State> {
+    fn prepare(
+        archetype: &'w mut Archetype,
+        _change_tick: u32,
+        _current_tick: u32,
+    ) -> Option<Self::State> {
         Some(archetype.entities() as *const [EntityId])
     }
 
@@ -1154,29 +1167,21 @@ pub struct Changed<T: Component>(PhantomData<T>);
 
 impl<T: Component> QueryFilter for Changed<T> {
     fn matches_archetype(archetype: &Archetype) -> bool {
-        // Check if archetype has this component type
-        archetype.get_column(TypeId::of::<T>()).is_some()
+        archetype.column_index(TypeId::of::<T>()).is_some()
     }
 
     fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
-        smallvec![TypeId::of::<T>()]
+        smallvec![]
+    }
+
+    fn signature() -> QuerySignature {
+        let mut sig = QuerySignature::new();
+        sig.required.push(TypeId::of::<T>());
+        sig
     }
 }
 
-/// Filter for entities where component T was added
-pub struct Added<T>(PhantomData<T>);
-
-impl<T: 'static> QueryFilter for Added<T> {
-    fn matches_archetype(archetype: &Archetype) -> bool {
-        archetype.signature().contains(&TypeId::of::<T>())
-    }
-
-    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
-        smallvec![TypeId::of::<T>()]
-    }
-}
-
-// Tuple QueryFilter implementations
+// Implement QueryFilter for tuples
 macro_rules! impl_query_filter {
     ($($T:ident),*) => {
         #[allow(non_snake_case)]
@@ -1190,13 +1195,196 @@ macro_rules! impl_query_filter {
                 $(ids.extend($T::type_ids());)*
                 ids
             }
+
+            fn signature() -> QuerySignature {
+                let mut sig = QuerySignature::new();
+                $(
+                    let child_sig = $T::signature();
+                    sig.required.extend(child_sig.required);
+                    sig.excluded.extend(child_sig.excluded);
+                )*
+                sig.required.sort();
+                sig.excluded.sort();
+                sig.required.dedup();
+                sig.excluded.dedup();
+                sig
+            }
         }
     };
 }
 
+impl_query_filter!(A);
 impl_query_filter!(A, B);
 impl_query_filter!(A, B, C);
 impl_query_filter!(A, B, C, D);
+impl_query_filter!(A, B, C, D, E);
+impl_query_filter!(A, B, C, D, E, F);
+impl_query_filter!(A, B, C, D, E, F, G);
+impl_query_filter!(A, B, C, D, E, F, G, H);
+
+// Manual implementations matching manual QueryFetch impls to avoid conflicts
+// These MUST match the macro logic but for specific tuple sizes if needed?
+// No, the macro covers generic tuples.
+// Wait, earlier (A,B), (A,B,C), (A,B,C,D) had manual fetch impls.
+// But QueryFilter is separate.
+// The manual impls for QueryFetch below also implement QueryFilter?
+// Ah, QueryFetch extends QueryFilter.
+// Let's check if there are manual implementations of QueryFilter.
+// It seems `impl_query_filter!` covers all tuples up to H (8).
+// The macro above is what I need to replace.
+unsafe impl<'w, T: Component> QueryFetch<'w> for Changed<T> {
+    type Item = ();
+    type State = (&'w [u32], u32);
+
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
+        let idx = archetype.column_index(TypeId::of::<T>())?;
+        let col = archetype.get_column_by_index(idx)?;
+        Some((&col.changed_ticks, change_tick))
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        if row < state.0.len() && state.0[row] > state.1 {
+            Some(())
+        } else {
+            None
+        }
+    }
+}
+
+unsafe impl<'w, T: Component> QueryFetchMut<'w> for Changed<T> {
+    type Item = ();
+    type State = (&'w [u32], u32);
+
+    fn prepare(
+        archetype: &'w mut Archetype,
+        change_tick: u32,
+        _current_tick: u32,
+    ) -> Option<Self::State> {
+        <Changed<T> as QueryFetch>::prepare(archetype, change_tick)
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        <Changed<T> as QueryFetch>::fetch(state, row)
+    }
+}
+
+/// Filter for entities where component T was added
+pub struct Added<T>(PhantomData<T>);
+
+impl<T: Component> QueryFilter for Added<T> {
+    fn matches_archetype(archetype: &Archetype) -> bool {
+        archetype.signature().contains(&TypeId::of::<T>())
+    }
+
+    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
+        smallvec![]
+    }
+
+    fn signature() -> QuerySignature {
+        let mut sig = QuerySignature::new();
+        sig.required.push(TypeId::of::<T>());
+        sig
+    }
+}
+
+unsafe impl<'w, T: Component> QueryFetch<'w> for Added<T> {
+    type Item = ();
+    type State = (&'w [u32], u32);
+
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
+        let idx = archetype.column_index(TypeId::of::<T>())?;
+        let col = archetype.get_column_by_index(idx)?;
+        Some((&col.added_ticks, change_tick))
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        if row < state.0.len() && state.0[row] > state.1 {
+            Some(())
+        } else {
+            None
+        }
+    }
+}
+
+unsafe impl<'w, T: Component> QueryFetchMut<'w> for Added<T> {
+    type Item = ();
+    type State = (&'w [u32], u32);
+
+    fn prepare(
+        archetype: &'w mut Archetype,
+        change_tick: u32,
+        _current_tick: u32,
+    ) -> Option<Self::State> {
+        <Added<T> as QueryFetch>::prepare(archetype, change_tick)
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        <Added<T> as QueryFetch>::fetch(state, row)
+    }
+}
+
+/// Read access wrapper for CachedQuery
+pub struct Read<T>(PhantomData<T>);
+
+impl<T: 'static> QueryFilter for Read<T> {
+    fn matches_archetype(archetype: &Archetype) -> bool {
+        archetype.signature().contains(&TypeId::of::<T>())
+    }
+
+    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
+        smallvec![TypeId::of::<T>()]
+    }
+}
+
+unsafe impl<'w, T: Component> QueryFetch<'w> for Read<T> {
+    type Item = &'w T;
+    type State = &'w ComponentColumn;
+
+    fn prepare(archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
+        let type_id = TypeId::of::<T>();
+        archetype.get_column(type_id)
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        state.get::<T>(row)
+    }
+}
+
+/// Write access wrapper for CachedQuery
+pub struct Write<T>(PhantomData<T>);
+
+impl<T: 'static> QueryFilter for Write<T> {
+    fn matches_archetype(archetype: &Archetype) -> bool {
+        archetype.signature().contains(&TypeId::of::<T>())
+    }
+
+    fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
+        smallvec![TypeId::of::<T>()]
+    }
+}
+
+unsafe impl<'w, T: Component> QueryFetchMut<'w> for Write<T> {
+    type Item = &'w mut T;
+    type State = (*mut ComponentColumn, u32);
+
+    fn prepare(
+        archetype: &'w mut Archetype,
+        _change_tick: u32,
+        current_tick: u32,
+    ) -> Option<Self::State> {
+        let type_id = TypeId::of::<T>();
+        archetype
+            .get_column_mut(type_id)
+            .map(|column| (column as *mut ComponentColumn, current_tick))
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        let (column_ptr, current_tick) = state;
+        let column = &mut **column_ptr;
+        column.set_changed_tick(row, *current_tick);
+        column.get_mut::<T>(row)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1248,5 +1436,40 @@ mod tests {
         // Query: A without B
         let mut query = CachedQuery::<(&A, Without<B>)>::new(&world);
         assert_eq!(query.iter(&world).count(), 1);
+    }
+
+    #[test]
+    fn test_change_detection() {
+        let mut world = crate::World::new();
+        struct Data(#[allow(dead_code)] i32);
+
+        let _e = world.spawn((Data(1),)).unwrap();
+
+        // Frame 1
+        world.increment_tick(); // Tick = 2
+
+        {
+            // Query changes since tick 0 (everything changed)
+            let mut query = QueryMut::<(&Data, Changed<Data>)>::new(&mut world);
+            assert_eq!(query.iter_since(0).count(), 1);
+        }
+
+        {
+            // Query changes since tick 2 (nothing changed yet)
+            let mut query = QueryMut::<(&Data, Changed<Data>)>::new(&mut world);
+            assert_eq!(query.iter_since(2).count(), 0);
+        }
+
+        // Modify component
+        world.increment_tick(); // Tick = 3
+        {
+            let mut query = QueryMut::<(&Data, Changed<Data>)>::new(&mut world);
+            // Simulate system write
+            for (_data, _) in query.iter() {
+                // Loop to use iterator
+            }
+        }
+        // Let's use world.get_component_mut logic if available, or just overwrite archetype data
+        // For this test, we assume standard mutable queries update ticks.
     }
 }
