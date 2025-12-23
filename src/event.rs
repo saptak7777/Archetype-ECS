@@ -115,7 +115,7 @@ mod tests {
     fn test_event_queue_push_pop() {
         let mut queue = EventQueue::new();
         let mut world = World::new();
-        let id = world.spawn((TestComponent,)).unwrap();
+        let id = world.spawn((TestComponent,));
 
         queue.push(EntityEvent::Spawned(id));
         assert!(!queue.is_empty());
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn test_event_entity_id() {
         let mut world = World::new();
-        let id = world.spawn((TestComponent,)).unwrap();
+        let id = world.spawn((TestComponent,));
         let event = EntityEvent::Spawned(id);
         assert_eq!(event.entity_id(), id);
     }

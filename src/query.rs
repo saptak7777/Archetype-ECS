@@ -77,8 +77,8 @@ impl QuerySignature {
 
 /// Cached result for a specific query signature
 pub struct CachedQueryResult {
-    pub matched_archetypes: Vec<usize>,
-    pub last_archetype_count: usize,
+    pub matches: Vec<usize>,
+    pub seen_archetypes: usize,
     pub signature: QuerySignature,
 }
 
@@ -97,25 +97,22 @@ impl CachedQueryResult {
             .collect();
 
         Self {
-            matched_archetypes: matched,
-            last_archetype_count: archetypes.len(),
+            matches: matched,
+            seen_archetypes: archetypes.len(),
             signature,
         }
     }
 
     pub fn update(&mut self, archetypes: &[Archetype]) {
-        let current_count = archetypes.len();
-        if current_count > self.last_archetype_count {
-            for (id, arch) in archetypes
-                .iter()
-                .enumerate()
-                .skip(self.last_archetype_count)
-            {
+        let count = archetypes.len();
+        if count > self.seen_archetypes {
+            // Check only new archetypes
+            for (id, arch) in archetypes.iter().enumerate().skip(self.seen_archetypes) {
                 if self.signature.matches(arch) {
-                    self.matched_archetypes.push(id);
+                    self.matches.push(id);
                 }
             }
-            self.last_archetype_count = current_count;
+            self.seen_archetypes = count;
         }
     }
 }
@@ -130,7 +127,6 @@ pub trait QueryFilter {
 
     /// Get query signature for caching
     fn signature() -> QuerySignature {
-        // Default implementation for basic components
         let mut sig = QuerySignature::new();
         sig.required = Self::type_ids();
         sig.required.sort();
@@ -169,7 +165,6 @@ where
         QueryIterMut::new(self.world, &matched, 0, self.world.tick())
     }
 
-    /// Iterate results changed since `tick`
     pub fn iter_since(&'w mut self, tick: u32) -> QueryIterMut<'w, Q> {
         let matched = self.world.get_cached_query_indices::<Q>();
         QueryIterMut::new(self.world, &matched, tick, self.world.tick())
@@ -197,30 +192,83 @@ where
     {
         use rayon::prelude::*;
 
-        // 1. Get matched archetypes
         let matched = self.world.get_cached_query_indices::<Q>();
-
-        // 2. Prepare for parallel execution
-        // We need to share the world pointer safely across threads
         let world_ptr = self.world as *mut World as usize;
 
-        // 3. Iterate over archetypes in parallel
+        // Iterate over matched archetypes in parallel, then chunks within each archetype
         matched.par_iter().for_each(|&arch_id| {
-            // SAFETY:
-            // 1. We have exclusive access to world in QueryMut
-            // 2. We are reading distinct archetypes (arch_id is unique)
-            // 3. We are not mutating the archetype list
-            // 4. The pointer is valid for the duration of this function
+            // SAFETY: Distinct archetypes accessed in parallel. World pointer valid for duration.
             let world = unsafe { &mut *(world_ptr as *mut World) };
 
             if let Some(archetype) = world.get_archetype_mut(arch_id) {
-                // Iterate over chunks of this archetype
-                let chunks = archetype.chunks_mut(crate::archetype::DEFAULT_CHUNK_SIZE);
+                archetype
+                    .chunks_mut(crate::archetype::DEFAULT_CHUNK_SIZE)
+                    .into_par_iter()
+                    .for_each(&func);
+            }
+        });
+    }
 
-                // Process chunks in parallel (nested parallelism)
-                chunks.into_par_iter().for_each(|chunk| {
-                    func(chunk);
-                });
+    /// Create a parallel query wrapper
+    #[cfg(feature = "parallel")]
+    pub fn par(self) -> ParQuery<'w, Q> {
+        ParQuery::new(self)
+    }
+}
+
+/// Parallel query wrapper for ergonomic multi-core iteration
+#[cfg(feature = "parallel")]
+pub struct ParQuery<'w, Q>
+where
+    Q: QueryFilter + QueryFetchMut<'w>,
+{
+    query: QueryMut<'w, Q>,
+}
+
+#[cfg(feature = "parallel")]
+impl<'w, Q> ParQuery<'w, Q>
+where
+    Q: QueryFilter + QueryFetchMut<'w>,
+{
+    /// Create a new parallel query
+    pub fn new(query: QueryMut<'w, Q>) -> Self {
+        Self { query }
+    }
+
+    /// Parallel iteration over matching entities
+    ///
+    /// Splits work across CPU cores at the archetype level.
+    pub fn for_each<F>(&mut self, func: F)
+    where
+        F: Fn(Q::Item) + Send + Sync,
+        Q: Send + Sync,
+        Q::Item: Send,
+    {
+        use rayon::prelude::*;
+
+        let matched = self.query.world.get_cached_query_indices::<Q>();
+        let world_ptr = self.query.world as *mut World as usize;
+        let current_tick = self.query.world.tick();
+
+        matched.par_iter().for_each(|&arch_id| {
+            // SAFETY: Each archetype is processed by a single thread via par_iter above.
+            // Distinct archetypes can be safely mutated in parallel.
+            // We cast to &'w mut World to satisfy'w lifetime requirements of QueryFetchMut.
+            let world = unsafe { &mut *(world_ptr as *mut World) };
+
+            if let Some(archetype) = world.get_archetype_mut(arch_id) {
+                // SAFETY: We must cast to the expected lifetime 'w. This is safe because
+                // the World is mutably borrowed for 'w and we are accessing distinct archetypes.
+                let archetype_w = unsafe { &mut *(archetype as *mut Archetype) };
+                let len = archetype_w.len();
+                if let Some(mut state) = Q::prepare(archetype_w, 0, current_tick) {
+                    for row in 0..len {
+                        // SAFETY: Row is within bounds, and state is uniquely owned by this thread for this archetype.
+                        if let Some(item) = unsafe { Q::fetch(&mut state, row) } {
+                            func(item);
+                        }
+                    }
+                }
             }
         });
     }
@@ -284,41 +332,44 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            // Acquire state for the current archetype if we don't have one
             if self.state.is_none() {
                 if self.archetype_index >= self.archetypes.len() {
                     return None;
                 }
 
-                let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
-                // SAFETY: Valid pointer from world, tied to 'w lifetime
-                let archetype = unsafe { &*archetype_ptr };
-
-                self.state = Q::prepare(archetype, self.change_tick);
+                let ptr = self.archetypes[self.archetype_index].as_ptr();
+                // SAFETY: Ptr valid from World, 'w lifetime
+                self.state = Q::prepare(unsafe { &*ptr }, self.change_tick);
                 self.entity_index = 0;
 
+                // specific archetype might not match filter requirements (e.g. Changed filter)
+                // so we might get None state even if archetype was in the list.
                 if self.state.is_none() {
                     self.archetype_index += 1;
                     continue;
                 }
             }
 
+            // We have a valid state, try to fetch components for current entity
             let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
             let archetype = unsafe { &*archetype_ptr };
 
-            if self.entity_index < archetype.len() {
-                let row = self.entity_index;
-                self.entity_index += 1;
-
-                // SAFETY: We checked bounds above. State is valid for this archetype.
-                if let Some(item) = unsafe { Q::fetch(self.state.as_ref().unwrap(), row) } {
-                    return Some(item);
-                } else {
-                    continue;
-                }
-            } else {
+            if self.entity_index >= archetype.len() {
+                // Archetype exhausted, move next
                 self.state = None;
                 self.archetype_index += 1;
+                continue;
             }
+
+            let row = self.entity_index;
+            self.entity_index += 1;
+
+            // SAFETY: bounds checked above. State valid.
+            if let Some(item) = unsafe { Q::fetch(self.state.as_ref().unwrap(), row) } {
+                return Some(item);
+            }
+            // If fetch returns None (e.g. filter failed for this specific row), continue
         }
     }
 
@@ -402,19 +453,14 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // Check if we have a valid state for current archetype
+            // No state? Try to acquire it for next archetype
             if self.state.is_none() {
                 if self.archetype_index >= self.archetypes.len() {
                     return None;
                 }
 
                 let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
-                // SAFETY: This is safe because:
-                // 1. archetype_ptr comes from world.archetype_ptr_mut() which returns valid pointers
-                // 2. The pointer is valid for the lifetime 'w (tied to world borrow)
-                // 3. No other code is mutating the archetype list during iteration
-                // 4. NonNull guarantees the pointer is non-null
-                // 5. The archetype exists for the duration of the query
+                // SAFETY: Ptr valid from World, 'w lifetime
                 let archetype = unsafe { &mut *archetype_ptr };
 
                 self.state = Q::prepare(archetype, self.change_tick, self.current_tick);
@@ -422,31 +468,29 @@ where
 
                 if self.state.is_none() {
                     self.archetype_index += 1;
-                    continue;
+                    continue; // Archetype empty or filtered out
                 }
             }
 
-            // We have a state, try to fetch
+            // Valid state, fetch next entity
             let archetype_ptr = self.archetypes[self.archetype_index].as_ptr();
-            // SAFETY: Same as above
             let archetype = unsafe { &*archetype_ptr };
 
-            if self.entity_index < archetype.len() {
-                let row = self.entity_index;
-                self.entity_index += 1;
-
-                // SAFETY: We checked bounds above. State is valid for this archetype.
-                // SAFETY: We checked bounds above. State is valid for this archetype.
-                if let Some(item) = unsafe { Q::fetch(self.state.as_mut().unwrap(), row) } {
-                    return Some(item);
-                } else {
-                    continue;
-                }
-            } else {
-                // Finished this archetype
+            if self.entity_index >= archetype.len() {
+                // Done with this archetype
                 self.state = None;
                 self.archetype_index += 1;
+                continue;
             }
+
+            let row = self.entity_index;
+            self.entity_index += 1;
+
+            // SAFETY: Bounds checked. State is valid.
+            if let Some(item) = unsafe { Q::fetch(self.state.as_mut().unwrap(), row) } {
+                return Some(item);
+            }
+            // Fetch failed (filter?), skip to next entity
         }
     }
 }
@@ -609,6 +653,27 @@ unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w T {
 // Generic tuple implementations for QueryFetchMut
 // These use QueryFetchMut bounds, allowing mixed types like (Entity, &mut T), (&T, &mut U), etc.
 
+unsafe impl<'w, A: QueryFetchMut<'w>> QueryFetchMut<'w> for (A,)
+where
+    A: QueryFilter,
+{
+    type Item = (A::Item,);
+    type State = (A::State,);
+
+    fn prepare(
+        archetype: &'w mut Archetype,
+        change_tick: u32,
+        current_tick: u32,
+    ) -> Option<Self::State> {
+        let state_a = A::prepare(archetype, change_tick, current_tick)?;
+        Some((state_a,))
+    }
+
+    unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
+        Some((A::fetch(&mut state.0, row)?,))
+    }
+}
+
 unsafe impl<'w, A: QueryFetchMut<'w>, B: QueryFetchMut<'w>> QueryFetchMut<'w> for (A, B)
 where
     A: QueryFilter,
@@ -707,6 +772,19 @@ where
 
 // Manual implementations for tuple QueryFetch (immutable) to avoid macro complexity
 
+unsafe impl<'w, A: QueryFetch<'w>> QueryFetch<'w> for (A,) {
+    type Item = (A::Item,);
+    type State = (A::State,);
+
+    fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
+        Some((A::prepare(archetype, change_tick)?,))
+    }
+
+    unsafe fn fetch(state: &Self::State, row: usize) -> Option<Self::Item> {
+        Some((A::fetch(&state.0, row)?,))
+    }
+}
+
 unsafe impl<'w, A: QueryFetch<'w>, B: QueryFetch<'w>> QueryFetch<'w> for (A, B) {
     type Item = (A::Item, B::Item);
     type State = (A::State, B::State);
@@ -803,8 +881,8 @@ unsafe impl<'w, A: QueryFetch<'w>, B: QueryFetch<'w>, C: QueryFetch<'w>, D: Quer
 /// }
 /// ```
 pub struct QueryState<F> {
-    matched_archetypes: Vec<usize>,
-    last_archetype_count: usize,
+    matches: Vec<usize>,
+    seen_archetypes: usize,
     _phantom: PhantomData<F>,
 }
 
@@ -831,20 +909,19 @@ impl<F: QueryFilter> QueryState<F> {
             .collect();
 
         Self {
-            matched_archetypes: matched,
-            last_archetype_count: world.archetype_count(),
+            matches: matched,
+            seen_archetypes: world.archetype_count(),
             _phantom: PhantomData,
         }
     }
 
     /// Iterate query results
     ///
-    /// Note: Returns iterator that borrows from self.matched_archetypes
     pub fn iter<'w, 's>(&'s self, world: &'w World, change_tick: u32) -> QueryIter<'w, F>
     where
         F: QueryFetch<'w>,
     {
-        QueryIter::new(world, &self.matched_archetypes, change_tick)
+        QueryIter::new(world, &self.matches, change_tick)
     }
 
     /// Iterate query results mutably
@@ -852,37 +929,31 @@ impl<F: QueryFilter> QueryState<F> {
     where
         F: QueryFetchMut<'w>,
     {
-        QueryIterMut::new(world, &self.matched_archetypes, change_tick, world.tick())
+        QueryIterMut::new(world, &self.matches, change_tick, world.tick())
     }
 
-    /// Get number of matched archetypes
-    pub fn matched_archetype_count(&self) -> usize {
-        self.matched_archetypes.len()
+    pub fn match_count(&self) -> usize {
+        self.matches.len()
     }
 
     /// Update query state with new archetypes (incremental)
     pub fn update(&mut self, world: &World) {
         #[cfg(feature = "profiling")]
-        let span = info_span!(
-            "query_state.invalidate",
-            archetype_count = world.archetype_count()
-        );
-        #[cfg(feature = "profiling")]
-        let _span_guard = span.enter();
+        let _span = info_span!("query_state.update").enter();
 
-        let current_count = world.archetype_count();
-        if current_count > self.last_archetype_count {
+        let count = world.archetype_count();
+        if count > self.seen_archetypes {
             for (id, arch) in world
                 .archetypes()
                 .iter()
                 .enumerate()
-                .skip(self.last_archetype_count)
+                .skip(self.seen_archetypes)
             {
                 if F::matches_archetype(arch) {
-                    self.matched_archetypes.push(id);
+                    self.matches.push(id);
                 }
             }
-            self.last_archetype_count = current_count;
+            self.seen_archetypes = count;
         }
     }
 }
@@ -916,7 +987,7 @@ where
         let state = QueryState::<Q>::new(self.world);
         QueryIterOwned {
             world: self.world,
-            matched_archetypes: state.matched_archetypes,
+            matches: state.matches,
             archetype_index: 0,
             entity_index: 0,
             change_tick: 0, // Stateless query matches everything
@@ -937,7 +1008,7 @@ where
     Q: QueryFetch<'w>,
 {
     world: &'w World,
-    matched_archetypes: Vec<usize>,
+    matches: Vec<usize>,
     archetype_index: usize,
     entity_index: usize,
     change_tick: u32,
@@ -954,11 +1025,11 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.state.is_none() {
-                if self.archetype_index >= self.matched_archetypes.len() {
+                if self.archetype_index >= self.matches.len() {
                     return None;
                 }
 
-                let arch_id = self.matched_archetypes[self.archetype_index];
+                let arch_id = self.matches[self.archetype_index];
                 let archetype = self.world.get_archetype(arch_id)?;
 
                 self.state = Q::prepare(archetype, self.change_tick);
@@ -970,7 +1041,7 @@ where
                 }
             }
 
-            let arch_id = self.matched_archetypes[self.archetype_index];
+            let arch_id = self.matches[self.archetype_index];
             let archetype = self.world.get_archetype(arch_id)?;
 
             if self.entity_index < archetype.len() {
@@ -997,40 +1068,12 @@ where
 {
     fn len(&self) -> usize {
         let mut count = 0;
-        for &arch_id in &self.matched_archetypes {
+        for &arch_id in &self.matches {
             if let Some(arch) = self.world.get_archetype(arch_id) {
                 count += arch.len();
             }
         }
         count.saturating_sub(self.entity_index)
-    }
-}
-
-// QueryFetch implementations for filter types
-
-unsafe impl<'w, T: 'static> QueryFetch<'w> for With<T> {
-    type Item = ();
-    type State = ();
-
-    fn prepare(_archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
-        Some(())
-    }
-
-    unsafe fn fetch(_state: &Self::State, _row: usize) -> Option<Self::Item> {
-        Some(())
-    }
-}
-
-unsafe impl<'w, T: 'static> QueryFetch<'w> for Without<T> {
-    type Item = ();
-    type State = ();
-
-    fn prepare(_archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
-        Some(())
-    }
-
-    unsafe fn fetch(_state: &Self::State, _row: usize) -> Option<Self::Item> {
-        Some(())
     }
 }
 
@@ -1093,6 +1136,36 @@ impl<T: 'static> QueryFilter for With<T> {
     }
 }
 
+unsafe impl<'w, T: 'static> QueryFetch<'w> for With<T> {
+    type Item = ();
+    type State = ();
+
+    fn prepare(_archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
+        Some(())
+    }
+
+    unsafe fn fetch(_state: &Self::State, _row: usize) -> Option<Self::Item> {
+        Some(())
+    }
+}
+
+unsafe impl<'w, T: 'static> QueryFetchMut<'w> for With<T> {
+    type Item = ();
+    type State = ();
+
+    fn prepare(
+        _archetype: &'w mut Archetype,
+        _change_tick: u32,
+        _current_tick: u32,
+    ) -> Option<Self::State> {
+        Some(())
+    }
+
+    unsafe fn fetch(_state: &mut Self::State, _row: usize) -> Option<Self::Item> {
+        Some(())
+    }
+}
+
 /// Filter for entities without component T
 pub struct Without<T>(PhantomData<T>);
 
@@ -1106,6 +1179,36 @@ impl<T: 'static> QueryFilter for Without<T> {
     }
 }
 
+unsafe impl<'w, T: 'static> QueryFetch<'w> for Without<T> {
+    type Item = ();
+    type State = ();
+
+    fn prepare(_archetype: &'w Archetype, _change_tick: u32) -> Option<Self::State> {
+        Some(())
+    }
+
+    unsafe fn fetch(_state: &Self::State, _row: usize) -> Option<Self::Item> {
+        Some(())
+    }
+}
+
+unsafe impl<'w, T: 'static> QueryFetchMut<'w> for Without<T> {
+    type Item = ();
+    type State = ();
+
+    fn prepare(
+        _archetype: &'w mut Archetype,
+        _change_tick: u32,
+        _current_tick: u32,
+    ) -> Option<Self::State> {
+        Some(())
+    }
+
+    unsafe fn fetch(_state: &mut Self::State, _row: usize) -> Option<Self::Item> {
+        Some(())
+    }
+}
+
 /// Marker type for fetching EntityId in queries
 ///
 /// Use this to access the entity ID during query iteration:
@@ -1116,6 +1219,7 @@ impl<T: 'static> QueryFilter for Without<T> {
 ///     }
 /// }
 /// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Entity;
 
 impl QueryFilter for Entity {
@@ -1239,6 +1343,12 @@ unsafe impl<'w, T: Component> QueryFetch<'w> for Changed<T> {
     fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
         let idx = archetype.column_index(TypeId::of::<T>())?;
         let col = archetype.get_column_by_index(idx)?;
+
+        // Chunk-level optimization: skip if no changes in this archetype
+        if !col.changed_since(change_tick) {
+            return None;
+        }
+
         Some((&col.changed_ticks, change_tick))
     }
 
@@ -1294,6 +1404,12 @@ unsafe impl<'w, T: Component> QueryFetch<'w> for Added<T> {
     fn prepare(archetype: &'w Archetype, change_tick: u32) -> Option<Self::State> {
         let idx = archetype.column_index(TypeId::of::<T>())?;
         let col = archetype.get_column_by_index(idx)?;
+
+        // Chunk-level optimization: skip if no additions in this archetype
+        if !col.added_since(change_tick) {
+            return None;
+        }
+
         Some((&col.added_ticks, change_tick))
     }
 
@@ -1396,7 +1512,7 @@ mod tests {
         let state = QueryState::<&i32>::new(&world);
         // There are no archetypes containing i32 yet
         // There are no archetypes containing i32 yet
-        assert_eq!(state.matched_archetype_count(), 0);
+        assert_eq!(state.match_count(), 0);
     }
 
     #[test]
@@ -1405,15 +1521,15 @@ mod tests {
         let mut query = CachedQuery::<&i32>::new(&world);
 
         // Initially empty (except potentially empty archetype)
-        let initial_count = query.state.matched_archetype_count();
+        let initial_count = query.state.match_count();
 
         // Add archetype matching query
-        world.spawn((10i32,)).unwrap();
+        world.spawn((10i32,));
 
         // Iterating should update state
         let count = query.iter(&world).count();
         assert_eq!(count, 1);
-        assert!(query.state.matched_archetype_count() > initial_count);
+        assert!(query.state.match_count() > initial_count);
     }
 
     #[test]
@@ -1425,9 +1541,9 @@ mod tests {
         #[derive(Debug, Clone, Copy)]
         struct B;
 
-        world.spawn((A, B)).unwrap();
-        world.spawn((A,)).unwrap();
-        world.spawn((B,)).unwrap();
+        world.spawn((A, B));
+        world.spawn((A,));
+        world.spawn((B,));
 
         // Query: A with B
         let mut query = CachedQuery::<(&A, With<B>)>::new(&world);
@@ -1443,7 +1559,7 @@ mod tests {
         let mut world = crate::World::new();
         struct Data(#[allow(dead_code)] i32);
 
-        let _e = world.spawn((Data(1),)).unwrap();
+        let _e = world.spawn((Data(1),));
 
         // Frame 1
         world.increment_tick(); // Tick = 2

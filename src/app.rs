@@ -1,7 +1,6 @@
 use crate::error::Result;
 use crate::executor::Executor;
 use crate::plugin::Plugin;
-use crate::resources::ResourceManager;
 use crate::schedule::Schedule;
 use crate::system::BoxedSystem;
 use crate::world::World;
@@ -11,7 +10,6 @@ pub struct App {
     pub world: World,
     pub schedule: Schedule,
     pub executor: Executor,
-    pub resources: ResourceManager,
 }
 
 impl App {
@@ -20,9 +18,8 @@ impl App {
         let schedule = Schedule::new();
         Self {
             world: World::new(),
-            executor: Executor::new(Schedule::new()), // Temporary, will be updated
+            executor: Executor::new(Schedule::new()),
             schedule,
-            resources: ResourceManager::new(1024 * 1024 * 100), // 100MB default
         }
     }
 
@@ -35,16 +32,6 @@ impl App {
     /// Add a system
     pub fn add_system(&mut self, system: BoxedSystem) -> &mut Self {
         self.schedule.add_system(system);
-        self
-    }
-
-    /// Add a resource
-    pub fn add_resource<T: crate::resources::Resource + 'static>(
-        &mut self,
-        path: &str,
-        resource: T,
-    ) -> &mut Self {
-        self.resources.load(path, resource).unwrap();
         self
     }
 

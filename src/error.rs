@@ -69,6 +69,12 @@ pub enum EcsError {
 
     /// Asset not found
     AssetNotFound(String),
+
+    /// Batch size too large (possible DoS attack)
+    BatchTooLarge,
+
+    /// Hierarchy operation error (cycle, self-attach, etc.)
+    HierarchyError(String),
 }
 
 impl fmt::Display for EcsError {
@@ -91,6 +97,8 @@ impl fmt::Display for EcsError {
             EcsError::ResourceDeallocError(msg) => write!(f, "Resource deallocation error: {msg}"),
             EcsError::AssetLoadError(msg) => write!(f, "Asset load error: {msg}"),
             EcsError::AssetNotFound(msg) => write!(f, "Asset not found: {msg}"),
+            EcsError::BatchTooLarge => write!(f, "Batch size too large (max 10,000,000)"),
+            EcsError::HierarchyError(msg) => write!(f, "Hierarchy error: {msg}"),
         }
     }
 }

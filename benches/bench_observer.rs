@@ -24,7 +24,7 @@ fn bench_spawn_no_observers(c: &mut Criterion) {
         b.iter(|| {
             let mut world = World::new();
             for _ in 0..100 {
-                black_box(world.spawn((Position { x: 0.0, y: 0.0 },)).unwrap());
+                black_box(world.spawn((Position { x: 0.0, y: 0.0 },)));
             }
         })
     });
@@ -35,11 +35,7 @@ fn bench_spawn_with_event_no_observers(c: &mut Criterion) {
         b.iter(|| {
             let mut world = World::new();
             for _ in 0..100 {
-                black_box(
-                    world
-                        .spawn_with_event((Position { x: 0.0, y: 0.0 },))
-                        .unwrap(),
-                );
+                black_box(world.spawn_with_event((Position { x: 0.0, y: 0.0 },)));
             }
             world.process_events().ok();
         })
@@ -53,11 +49,7 @@ fn bench_spawn_with_noop_observer(c: &mut Criterion) {
             world.register_observer(Box::new(NoOpObserver)).ok();
 
             for _ in 0..100 {
-                black_box(
-                    world
-                        .spawn_with_event((Position { x: 0.0, y: 0.0 },))
-                        .unwrap(),
-                );
+                black_box(world.spawn_with_event((Position { x: 0.0, y: 0.0 },)));
             }
             world.process_events().ok();
         })
@@ -73,11 +65,7 @@ fn bench_spawn_with_stats_observer(c: &mut Criterion) {
                 .ok();
 
             for _ in 0..100 {
-                black_box(
-                    world
-                        .spawn_with_event((Position { x: 0.0, y: 0.0 },))
-                        .unwrap(),
-                );
+                black_box(world.spawn_with_event((Position { x: 0.0, y: 0.0 },)));
             }
             world.process_events().ok();
         })

@@ -19,9 +19,7 @@ fn main() {
     let mut world = World::new();
     let start = Instant::now();
     for _ in 0..1000 {
-        world
-            .spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)))
-            .unwrap();
+        world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)));
     }
     println!("Warmup (1k entities): {:?}", start.elapsed());
 
@@ -29,9 +27,7 @@ fn main() {
     let mut world = World::new();
     let start = Instant::now();
     for _ in 0..10_000 {
-        world
-            .spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)))
-            .unwrap();
+        world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)));
     }
     println!("Spawn 10k entities (2 components): {:?}", start.elapsed());
 
@@ -39,13 +35,11 @@ fn main() {
     let mut world = World::new();
     let start = Instant::now();
     for _ in 0..10_000 {
-        world
-            .spawn((
-                Position(1.0, 2.0, 3.0),
-                Velocity(1.0, 0.0, 0.0),
-                Health(100),
-            ))
-            .unwrap();
+        world.spawn((
+            Position(1.0, 2.0, 3.0),
+            Velocity(1.0, 0.0, 0.0),
+            Health(100),
+        ));
     }
     println!("Spawn 10k entities (3 components): {:?}", start.elapsed());
 
@@ -54,17 +48,13 @@ fn main() {
     let start = Instant::now();
     for i in 0..10_000 {
         if i % 2 == 0 {
-            world
-                .spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)))
-                .unwrap();
+            world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)));
         } else {
-            world
-                .spawn((
-                    Position(1.0, 2.0, 3.0),
-                    Velocity(1.0, 0.0, 0.0),
-                    Health(100),
-                ))
-                .unwrap();
+            world.spawn((
+                Position(1.0, 2.0, 3.0),
+                Velocity(1.0, 0.0, 0.0),
+                Health(100),
+            ));
         }
     }
     println!("Spawn 10k entities (mixed): {:?}", start.elapsed());

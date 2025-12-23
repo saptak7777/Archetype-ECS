@@ -26,6 +26,7 @@ impl SystemAccess {
 
     /// Merge two accesses (union of all reads/writes)
     pub fn merge(&self, other: &SystemAccess) -> SystemAccess {
+        // Pre-allocate to avoid multiple reallocations during extend
         let mut reads = Vec::with_capacity(self.reads.len() + other.reads.len());
         let mut writes = Vec::with_capacity(self.writes.len() + other.writes.len());
 
@@ -52,22 +53,20 @@ impl SystemAccess {
 
     /// Check if this access conflicts with another
     pub fn conflicts_with(&self, other: &SystemAccess) -> bool {
-        // Conflict if:
-        // - Both write to same component
-        // - One writes, other reads same component
-
+        // Check write conflicts
+        // NOTE: Could use HashSet for O(1) lookup, but small N makes linear scan faster
         for write in &self.writes {
             if other.writes.contains(write) {
-                return true; // Both write
+                return true;
             }
             if other.reads.contains(write) {
-                return true; // One writes, other reads
+                return true;
             }
         }
 
         for write in &other.writes {
             if self.reads.contains(write) {
-                return true; // Other writes, we read
+                return true;
             }
         }
 
@@ -135,7 +134,7 @@ mod tests {
 
         fn run(&mut self, world: &mut World) -> Result<()> {
             // Spawn and immediately despawn to ensure mutable access works
-            let entity = world.spawn((42i32,))?;
+            let entity = world.spawn((42i32,));
             world.despawn(entity).ok();
             Ok(())
         }

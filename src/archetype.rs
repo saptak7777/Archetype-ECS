@@ -84,6 +84,15 @@ pub struct Archetype {
 }
 
 impl Archetype {
+    pub(crate) fn add_column_raw(&mut self, type_id: TypeId, column: ComponentColumn) {
+        // Prevent duplicates
+        if !self.component_indices.contains_key(&type_id) {
+            let idx = self.components.len();
+            self.components.push(column);
+            self.component_indices.insert(type_id, idx);
+        }
+    }
+
     /// Create new archetype
     pub fn new(signature: ArchetypeSignature) -> Self {
         let mut archetype = Self {
@@ -102,14 +111,23 @@ impl Archetype {
         &self.signature
     }
 
+    /// Check if archetype has a component type
+    pub fn has_column(&self, type_id: TypeId) -> bool {
+        self.component_indices.contains_key(&type_id)
+    }
+
     /// Allocate row for entity
     pub fn allocate_row(&mut self, entity: EntityId, tick: u32) -> usize {
         let row = self.entities.len();
         self.entities.push(entity);
 
+        // Separate added/changed ticks: allows detecting modifications after spawn
+        // (e.g., component initialization systems)
         for column in &mut self.components {
             column.added_ticks.push(tick);
             column.changed_ticks.push(tick);
+            column.last_added_tick = tick;
+            column.last_change_tick = tick;
         }
 
         row
@@ -136,10 +154,23 @@ impl Archetype {
     /// - `Some(entity)` if another entity was swapped into this row (needs location update)
     /// - `None` if this was the last entity (no swap occurred)
     pub unsafe fn remove_row(&mut self, row: usize) -> Option<EntityId> {
+        // SAFETY: Caller must ensure row < len (contract violation = panic, not UB)
         if row >= self.entities.len() {
-            return None;
+            panic!(
+                "BUG: remove_row called with invalid row {} (len={})",
+                row,
+                self.entities.len()
+            );
         }
 
+        // Invariant check: entity and component counts must match (only if components exist)
+        if !self.components.is_empty() {
+            debug_assert_eq!(
+                self.entities.len(),
+                self.components[0].len(),
+                "Entity/component count mismatch"
+            );
+        }
         self.entities.swap_remove(row);
 
         for column in &mut self.components {
@@ -208,7 +239,6 @@ impl Archetype {
         self.components.get_mut(index)
     }
 
-    /// Get typed slice of components
     pub fn get_component_slice<T: Component>(&self) -> Option<&[T]> {
         let type_id = TypeId::of::<T>();
         let idx = *self.component_indices.get(&type_id)?;
@@ -224,24 +254,46 @@ impl Archetype {
 
     /// Reserve space for additional rows
     pub fn reserve_rows(&mut self, additional: usize) {
-        if self.entities.capacity() - self.entities.len() < additional {
+        // Cap excessive reservations (100K limit prevents pathological cases)
+        let additional = additional.min(100_000);
+
+        if additional == 0 {
+            return;
+        }
+
+        let current_capacity = self.entities.capacity();
+        let current_len = self.entities.len();
+
+        // Bail on inconsistent state (capacity < len should be impossible)
+        if current_capacity < current_len {
+            return;
+        }
+
+        if current_capacity - current_len < additional {
+            // Pre-allocate all columns together to avoid fragmentation
             self.entities.reserve(additional);
             for column in &mut self.components {
-                column.data.reserve(additional * column.item_size);
+                // Prevent overflow: fallback to minimal reservation on overflow
+                let byte_count = additional
+                    .checked_mul(column.item_size)
+                    .unwrap_or(column.item_size);
+                column.data.reserve(byte_count);
                 column.added_ticks.reserve(additional);
                 column.changed_ticks.reserve(additional);
             }
         }
     }
 
-    /// Get all entities
     pub fn entities(&self) -> &[EntityId] {
         &self.entities
     }
 
-    /// Number of entities
     pub fn len(&self) -> usize {
         self.entities.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
     }
 
     /// Iterate over chunks of entities for cache-friendly processing
@@ -305,13 +357,7 @@ impl Archetype {
                 });
             }
         }
-
-        chunks
-    }
-
-    /// Check if archetype is empty
-    pub fn is_empty(&self) -> bool {
-        self.entities.is_empty()
+        chunks // Collect for parallelization, not streaming
     }
 
     /// Register component column
@@ -343,6 +389,9 @@ pub struct ComponentColumn {
     pub(crate) added_ticks: Vec<u32>,
     pub(crate) changed_ticks: Vec<u32>,
 
+    /// Chunk-level added tracking
+    last_added_tick: u32,
+
     /// Chunk-level change tracking for efficient filtering
     last_change_tick: u32,
 }
@@ -365,8 +414,9 @@ impl ComponentColumn {
                     // The pointer:
                     // 1. Points to properly aligned memory (allocated for T)
                     // 2. Points to an initialized T (written via get_ptr_mut)
-                    // 3. Is only dropped once (called during ComponentColumn cleanup)
-                    // 4. Has the correct type (ptr was created for this column's T)
+                    // 1. Points to properly aligned memory (allocated for T)
+                    // 2. Is valid for reads/writes
+                    // 3. Will not be aliased (exclusive access during drop)
                     unsafe {
                         std::ptr::drop_in_place(ptr as *mut T);
                     }
@@ -376,8 +426,26 @@ impl ComponentColumn {
             },
             added_ticks: Vec::new(),
             changed_ticks: Vec::new(),
+            last_added_tick: 0,
             last_change_tick: 0,
         }
+    }
+
+    /// Create an empty clone of this column (preserving type info but with no data)
+    pub(crate) fn clone_empty(&self) -> Self {
+        Self {
+            data: Vec::new(),
+            item_size: self.item_size,
+            drop_fn: self.drop_fn,
+            added_ticks: Vec::new(),
+            changed_ticks: Vec::new(),
+            last_added_tick: 0,
+            last_change_tick: 0,
+        }
+    }
+    /// Get component item size
+    pub fn get_item_size(&self) -> usize {
+        self.item_size
     }
 
     /// Get mutable pointer for writing
@@ -425,6 +493,11 @@ impl ComponentColumn {
     /// Check if this column has changed since the given tick
     pub fn changed_since(&self, tick: u32) -> bool {
         self.last_change_tick > tick
+    }
+
+    /// Check if any components were added to this column since the given tick
+    pub fn added_since(&self, tick: u32) -> bool {
+        self.last_added_tick > tick
     }
 
     /// Get component at index

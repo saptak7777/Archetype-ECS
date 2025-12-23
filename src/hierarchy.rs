@@ -1,7 +1,8 @@
 use crate::entity::EntityId;
+use serde::{Deserialize, Serialize};
 
 /// Parent relationship component
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Parent(pub EntityId);
 
 impl Parent {
@@ -15,7 +16,7 @@ impl Parent {
 }
 
 /// Children relationship component
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Children {
     children: Vec<EntityId>,
 }
@@ -111,12 +112,8 @@ mod tests {
     #[test]
     fn test_children_management() {
         let mut world = World::new();
-        let id1 = world
-            .spawn((crate::transform::LocalTransform::identity(),))
-            .unwrap();
-        let id2 = world
-            .spawn((crate::transform::LocalTransform::identity(),))
-            .unwrap();
+        let id1 = world.spawn((crate::transform::LocalTransform::identity(),));
+        let id2 = world.spawn((crate::transform::LocalTransform::identity(),));
 
         let mut children = Children::new();
         children.add_child(id1);
@@ -134,9 +131,7 @@ mod tests {
     #[test]
     fn test_children_no_duplicates() {
         let mut world = World::new();
-        let id = world
-            .spawn((crate::transform::LocalTransform::identity(),))
-            .unwrap();
+        let id = world.spawn((crate::transform::LocalTransform::identity(),));
 
         let mut children = Children::new();
         children.add_child(id);

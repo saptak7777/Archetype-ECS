@@ -20,11 +20,7 @@ fn spawn_benchmark(c: &mut Criterion) {
         let mut world = World::new();
         b.iter(|| {
             for _ in 0..1000 {
-                black_box(
-                    world
-                        .spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)))
-                        .unwrap(),
-                );
+                black_box(world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0))));
             }
         });
     });
@@ -34,15 +30,11 @@ fn spawn_benchmark(c: &mut Criterion) {
         let mut world = World::new();
         b.iter(|| {
             for _ in 0..1000 {
-                black_box(
-                    world
-                        .spawn((
-                            Position(1.0, 2.0, 3.0),
-                            Velocity(1.0, 0.0, 0.0),
-                            Health(100),
-                        ))
-                        .unwrap(),
-                );
+                black_box(world.spawn((
+                    Position(1.0, 2.0, 3.0),
+                    Velocity(1.0, 0.0, 0.0),
+                    Health(100),
+                )));
             }
         });
     });
@@ -53,21 +45,13 @@ fn spawn_benchmark(c: &mut Criterion) {
         b.iter(|| {
             for i in 0..1000 {
                 if i % 2 == 0 {
-                    black_box(
-                        world
-                            .spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)))
-                            .unwrap(),
-                    );
+                    black_box(world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0))));
                 } else {
-                    black_box(
-                        world
-                            .spawn((
-                                Position(1.0, 2.0, 3.0),
-                                Velocity(1.0, 0.0, 0.0),
-                                Health(100),
-                            ))
-                            .unwrap(),
-                    );
+                    black_box(world.spawn((
+                        Position(1.0, 2.0, 3.0),
+                        Velocity(1.0, 0.0, 0.0),
+                        Health(100),
+                    )));
                 }
             }
         });

@@ -42,13 +42,11 @@ fn bench_spawn(c: &mut Criterion) {
         b.iter(|| {
             let mut world = AaaWorld::new();
             for i in 0..1_000 {
-                let _ = world
-                    .spawn((Position {
-                        x: i as f32,
-                        y: 0.0,
-                        z: 0.0,
-                    },))
-                    .unwrap();
+                let _ = world.spawn((Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },));
             }
         });
     });
@@ -110,21 +108,19 @@ fn bench_spawn(c: &mut Criterion) {
         b.iter(|| {
             let mut world = AaaWorld::new();
             for i in 0..1_000 {
-                let _ = world
-                    .spawn((
-                        Position {
-                            x: i as f32,
-                            y: 0.0,
-                            z: 0.0,
-                        },
-                        Velocity {
-                            x: 1.0,
-                            y: 0.0,
-                            z: 0.0,
-                        },
-                        Health(100),
-                    ))
-                    .unwrap();
+                let _ = world.spawn((
+                    Position {
+                        x: i as f32,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    Velocity {
+                        x: 1.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    Health(100),
+                ));
             }
         });
     });
@@ -294,16 +290,14 @@ fn bench_lookup(c: &mut Criterion) {
                 let mut world = AaaWorld::new();
                 let entities: Vec<_> = (0..count)
                     .map(|i| {
-                        world
-                            .spawn((
-                                Position {
-                                    x: i as f32,
-                                    y: 0.0,
-                                    z: 0.0,
-                                },
-                                Health(100),
-                            ))
-                            .unwrap()
+                        world.spawn((
+                            Position {
+                                x: i as f32,
+                                y: 0.0,
+                                z: 0.0,
+                            },
+                            Health(100),
+                        ))
                     })
                     .collect();
 
@@ -355,16 +349,14 @@ fn bench_despawn(c: &mut Criterion) {
                 let mut world = AaaWorld::new();
                 let entities: Vec<_> = (0..1_000)
                     .map(|i| {
-                        world
-                            .spawn((
-                                Position {
-                                    x: i as f32,
-                                    y: 0.0,
-                                    z: 0.0,
-                                },
-                                Health(100),
-                            ))
-                            .unwrap()
+                        world.spawn((
+                            Position {
+                                x: i as f32,
+                                y: 0.0,
+                                z: 0.0,
+                            },
+                            Health(100),
+                        ))
                     })
                     .collect();
                 (world, entities)
@@ -459,13 +451,11 @@ fn bench_archetype_segregation(c: &mut Criterion) {
             }
 
             for i in 0..250 {
-                let _ = world
-                    .spawn((Position {
-                        x: i as f32,
-                        y: 0.0,
-                        z: 0.0,
-                    },))
-                    .unwrap();
+                let _ = world.spawn((Position {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },));
             }
         });
     });
@@ -691,13 +681,11 @@ fn bench_entity_count(c: &mut Criterion) {
     c.bench_function("aaa_entity_count_10k", |b| {
         let mut world = AaaWorld::new();
         for i in 0..10_000 {
-            let _ = world
-                .spawn((Position {
-                    x: i as f32,
-                    y: 0.0,
-                    z: 0.0,
-                },))
-                .unwrap();
+            let _ = world.spawn((Position {
+                x: i as f32,
+                y: 0.0,
+                z: 0.0,
+            },));
         }
 
         b.iter(|| {
@@ -752,13 +740,11 @@ fn bench_archetype_count(c: &mut Criterion) {
         }
 
         for i in 0..100 {
-            let _ = world
-                .spawn((Position {
-                    x: i as f32,
-                    y: 0.0,
-                    z: 0.0,
-                },))
-                .unwrap();
+            let _ = world.spawn((Position {
+                x: i as f32,
+                y: 0.0,
+                z: 0.0,
+            },));
         }
 
         b.iter(|| {

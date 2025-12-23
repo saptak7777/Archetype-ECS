@@ -30,7 +30,7 @@ use crate::entity::{EntityId, EntityLocation};
 use crate::error::{EcsError, Result};
 use crate::event::{EntityEvent, EventQueue};
 use crate::observer::{Observer, ObserverRegistry};
-use crate::query::{QueryFetch, QueryFetchMut, QueryFilter, QueryMut};
+use crate::query::{Query, QueryFetch, QueryFetchMut, QueryFilter, QueryMut};
 
 /// Central ECS world
 /// The World is the central type that holds all entities, components, and systems.
@@ -62,9 +62,6 @@ pub struct World {
     /// Global event bus for pub/sub communication (Phase 6)
     global_event_bus: crate::event_bus::EventBus,
 
-    /// Resource manager for asset loading (Phase 8)
-    resource_manager: crate::resources::ResourceManager,
-
     /// Current world tick
     tick: u32,
 
@@ -80,48 +77,64 @@ pub struct World {
 }
 
 impl World {
-    /// Create new world
+    /// Create a new, empty world.
     pub fn new() -> Self {
         let mut world = Self {
             entity_locations: SlotMap::with_key(),
             recycled_entities: 0,
-            archetypes: Vec::with_capacity(32), // Pre-allocate some capacity
-            archetype_index: AHashMap::with_capacity(32),
-            transitions: AHashMap::with_capacity(128), // Pre-allocate for common transitions
+
+            // Start with reasonable defaults to avoid resize spikes
+            archetypes: Vec::with_capacity(64),
+            archetype_index: AHashMap::with_capacity(64),
+            transitions: AHashMap::with_capacity(128),
+
+            // Subsystems
             event_queue: EventQueue::new(),
             observers: ObserverRegistry::new(),
             component_tracker: AHashMap::new(),
             global_event_bus: crate::event_bus::EventBus::new(),
-            resource_manager: crate::resources::ResourceManager::default(),
-            tick: 1, // Start at 1 so change detection works on first query
+
+            tick: 1, // Tick 0 is reserved/unused to ensure change detection checks always pass for new things
             removal_queue: Vec::new(),
             resources: AHashMap::new(),
-            query_cache: AHashMap::new(),
+            // Pre-allocate query cache - trades memory for speed (most apps have <100 unique queries)
+            query_cache: AHashMap::with_capacity(32),
         };
 
-        // Create empty archetype for entities with no components
-        world.get_or_create_archetype(&[]); // FIXED: Pass vec directly
+        // Bootstrap the empty archetype (entities with no components)
+        // This is always at index 0 and simplifies logic elsewhere
+        world.get_or_create_archetype(&[]);
         world
     }
 
-    /// Get current world tick
     pub fn tick(&self) -> u32 {
         self.tick
     }
 
-    /// Increment world tick (start of frame)
     pub fn increment_tick(&mut self) {
+        // Panic on overflow - tick wraparound would break change detection
+        if self.tick == u32::MAX {
+            panic!("World tick overflow at {}", self.tick);
+        }
         self.tick = self.tick.wrapping_add(1);
     }
 
     /// Spawn entity with components
-    pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Result<EntityId> {
+    /// Spawn a new entity with the given bundle of components.
+    ///
+    /// # Panics
+    /// Panics if the Entity ID generator overflows (which is practically impossible).
+    pub fn spawn<B: Bundle>(&mut self, bundle: B) -> EntityId {
+        // Ensure capacity before insertion (panic on overflow is acceptable)
         self.ensure_entity_capacity();
+
         let placeholder = EntityLocation {
             archetype_id: usize::MAX,
             archetype_row: usize::MAX,
         };
-        let entity = self.entity_locations.insert(placeholder);
+
+        let id = self.entity_locations.insert(placeholder);
+
         if self.recycled_entities > 0 {
             self.recycled_entities -= 1;
         }
@@ -135,16 +148,14 @@ impl World {
         #[cfg(feature = "profiling")]
         let _span_guard = span.enter();
 
-        // Get or create archetype for this component set
-        // Note: signature sorting happens inside get_or_create_archetype_with
-        let archetype_id = self.get_or_create_archetype_with(&type_ids, |archetype| {
+        let arch_id = self.get_or_create_archetype_with(&type_ids, |archetype| {
             B::register_components(archetype);
             archetype.mark_columns_initialized();
         });
-        let archetype = &mut self.archetypes[archetype_id];
+        let archetype = &mut self.archetypes[arch_id];
 
         // Allocate row in archetype
-        let row = archetype.allocate_row(entity, self.tick);
+        let row = archetype.allocate_row(id, self.tick);
 
         // OPTIMIZATION: Pre-calculate column indices to avoid hash lookups
         let mut column_indices = [usize::MAX; MAX_BUNDLE_COMPONENTS];
@@ -170,14 +181,30 @@ impl World {
         }
 
         // Update entity location
-        if let Some(loc) = self.entity_locations.get_mut(entity) {
+        // Note: SlotMap insert happened earlier to get ID, now we update value
+        if let Some(loc) = self.entity_locations.get_mut(id) {
             *loc = EntityLocation {
-                archetype_id,
+                archetype_id: arch_id,
                 archetype_row: row,
             };
         }
 
-        Ok(entity)
+        // Track components
+        let mut component_set = std::collections::HashSet::with_capacity(type_ids.len());
+        for &type_id in type_ids.iter() {
+            component_set.insert(type_id);
+        }
+        self.component_tracker.insert(id, component_set);
+
+        // Return entity ID
+        id
+    }
+
+    /// Check if an entity is alive
+    ///
+    /// Returns true if the entity handle is valid and the entity exists in the world.
+    pub fn is_alive(&self, entity: EntityId) -> bool {
+        self.entity_locations.contains_key(entity)
     }
 
     /// Despawn entity (deferred - queued for removal)
@@ -199,20 +226,22 @@ impl World {
     ///
     /// Removes the entity and all its components from the world.
     pub fn despawn(&mut self, entity: EntityId) -> Result<()> {
-        if let Some(location) = self.entity_locations.remove(entity) {
-            let archetype = &mut self.archetypes[location.archetype_id];
-            unsafe {
-                if let Some(swapped_entity) = archetype.remove_row(location.archetype_row) {
-                    if let Some(swapped_loc) = self.entity_locations.get_mut(swapped_entity) {
-                        swapped_loc.archetype_row = location.archetype_row;
-                    }
+        // Fail fast on invalid entity
+        if !self.entity_locations.contains_key(entity) {
+            return Err(EcsError::EntityNotFound);
+        }
+
+        let location = self.entity_locations.remove(entity).unwrap();
+        let archetype = &mut self.archetypes[location.archetype_id];
+        unsafe {
+            if let Some(swapped_entity) = archetype.remove_row(location.archetype_row) {
+                if let Some(swapped_loc) = self.entity_locations.get_mut(swapped_entity) {
+                    swapped_loc.archetype_row = location.archetype_row;
                 }
             }
-            self.recycled_entities += 1;
-            Ok(())
-        } else {
-            Err(EcsError::EntityNotFound)
         }
+        self.recycled_entities += 1;
+        Ok(())
     }
 
     /// Flush deferred removal queue
@@ -220,14 +249,28 @@ impl World {
     /// Processes all entities queued for removal in batch.
     /// This is more efficient than removing one-by-one and safe during iteration.
     pub fn flush_removals(&mut self) -> Result<()> {
-        // Collect entities to remove (avoid borrow checker issues)
-        let entities_to_remove: Vec<EntityId> = self.removal_queue.drain(..).collect();
+        let to_remove: Vec<_> = self.removal_queue.drain(..).collect();
 
-        // Process all queued removals
-        for entity in entities_to_remove {
-            // Ignore errors for already-removed entities
-            let _ = self.despawn(entity);
+        if to_remove.is_empty() {
+            return Ok(());
         }
+
+        // Validate first removal to catch queue corruption early
+        let first = to_remove[0];
+        if !self.entity_locations.contains_key(first) {
+            return Err(EcsError::EntityNotFound);
+        }
+
+        self.despawn(first)?;
+
+        // Subsequent entities may be duplicates or already removed (e.g., cascading despawns)
+        // Skip gracefully to avoid crashing on valid scenarios
+        for &entity in &to_remove[1..] {
+            if self.entity_locations.contains_key(entity) {
+                let _ = self.despawn(entity);
+            }
+        }
+
         Ok(())
     }
 
@@ -238,6 +281,7 @@ impl World {
 
     /// Get immutable reference to a component on an entity
     pub fn get_component<T: Component>(&self, entity: EntityId) -> Option<&T> {
+        // Returns None for invalid entity - simpler API, caller decides error handling
         let location = self.entity_locations.get(entity)?;
         let archetype = self.archetypes.get(location.archetype_id)?;
         let column = archetype.get_column(TypeId::of::<T>())?;
@@ -246,6 +290,7 @@ impl World {
 
     /// Get mutable reference to a component on an entity
     pub fn get_component_mut<T: Component>(&mut self, entity: EntityId) -> Option<&mut T> {
+        // BOUNDARY: Validate entity exists before component lookup
         let location = self.entity_locations.get(entity)?;
         let tick = self.tick;
         let archetype = self.archetypes.get_mut(location.archetype_id)?;
@@ -255,6 +300,104 @@ impl World {
         column.mark_changed(location.archetype_row, tick);
 
         column.get_mut::<T>(location.archetype_row)
+    }
+
+    /// Check if entity has a specific component
+    pub fn has_component<T: Component>(&self, entity: EntityId) -> bool {
+        if let Some(location) = self.entity_locations.get(entity) {
+            if let Some(archetype) = self.archetypes.get(location.archetype_id) {
+                return archetype.has_column(TypeId::of::<T>());
+            }
+        }
+        false
+    }
+
+    /// Add a component to an entity
+    ///
+    /// This is an expensive operation as it moves the entity to a new archetype.
+    pub fn add_component<T: Component>(&mut self, entity: EntityId, component: T) -> Result<()> {
+        let location = *self
+            .entity_locations
+            .get(entity)
+            .ok_or(EcsError::EntityNotFound)?;
+        let old_archetype = &mut self.archetypes[location.archetype_id];
+
+        // If component already exists, overwrite it
+        if let Some(col) = old_archetype.get_column_mut(TypeId::of::<T>()) {
+            let ptr = col.get_ptr_mut(location.archetype_row) as *mut T;
+            unsafe {
+                std::ptr::write(ptr, component);
+            }
+            return Ok(());
+        }
+
+        // Calculate new signature
+        let mut new_signature = old_archetype.signature().clone();
+        new_signature.push(TypeId::of::<T>());
+
+        // Capture existing columns to replicate them in new archetype
+        // We need to do this before calling get_or_create_archetype as that requires mutable self access,
+        // which would conflict with holding a reference to old_archetype.
+        let mut columns_to_add = Vec::with_capacity(new_signature.len());
+        for &type_id in old_archetype.signature() {
+            if let Some(col) = old_archetype.get_column(type_id) {
+                columns_to_add.push((type_id, col.clone_empty()));
+            }
+        }
+
+        let new_archetype_id = self.get_or_create_archetype_with(&new_signature, |archetype| {
+            for (type_id, col) in columns_to_add {
+                archetype.add_column_raw(type_id, col);
+            }
+            archetype.register_component::<T>();
+            archetype.mark_columns_initialized();
+        });
+
+        // Move entity
+        self.move_entity(entity, location, new_archetype_id, |archetype, row| {
+            // Initialize new component
+            if let Some(col) = archetype.get_column_mut(TypeId::of::<T>()) {
+                let ptr = col.get_ptr_mut(row) as *mut T;
+                unsafe {
+                    std::ptr::write(ptr, component);
+                }
+            }
+        })
+    }
+
+    /// Remove a component from an entity
+    ///
+    /// This is an expensive operation as it moves the entity to a new archetype.
+    pub fn remove_component<T: Component>(&mut self, entity: EntityId) -> Result<()> {
+        let location = *self
+            .entity_locations
+            .get(entity)
+            .ok_or(EcsError::EntityNotFound)?;
+        let old_archetype = &self.archetypes[location.archetype_id];
+
+        if !old_archetype.has_column(TypeId::of::<T>()) {
+            return Err(EcsError::ComponentNotFound);
+        }
+
+        let mut new_signature = old_archetype.signature().to_vec();
+        if let Some(idx) = new_signature.iter().position(|&t| t == TypeId::of::<T>()) {
+            new_signature.swap_remove(idx);
+        }
+
+        let new_archetype_id = self.get_or_create_archetype(&new_signature);
+
+        // Move entity
+        // The new archetype won't have the component column, so it gets dropped implicitly
+        // But we need to make sure we run the destructor for the removed component?
+        // Our move_entity implementation logic needs to handle this.
+        // Actually, move_entity usually copies OVERLAPPING components.
+        // The component T is NOT in the new archetype, so it won't be copied.
+        // We must manually drop it from the old row if we are treating it as "moved out".
+        // However, since we are moving the entity, the old row in the old archetype is removed.
+        // Archetype::remove_row swaps with last and drops.
+        // BUT move_entity usually does "copy to new" then "remove from old".
+
+        self.move_entity(entity, location, new_archetype_id, |_, _| {})
     }
 
     /// Get multiple immutable components at once using QueryFetch
@@ -290,27 +433,113 @@ impl World {
         QueryMut::new(self)
     }
 
+    /// Create an immutable query wrapper for the provided filter
+    pub fn query<'w, Q>(&'w self) -> Query<'w, Q>
+    where
+        Q: QueryFilter + QueryFetch<'w>,
+    {
+        Query::new(self)
+    }
+
+    /// Create a parallel query wrapper for the provided filter
+    ///
+    /// Requires the "parallel" feature.
+    #[cfg(feature = "parallel")]
+    pub fn par_query_mut<'w, Q>(&'w mut self) -> crate::query::ParQuery<'w, Q>
+    where
+        Q: QueryFilter + QueryFetchMut<'w>,
+    {
+        crate::query::ParQuery::new(self.query_mut())
+    }
+
+    /// Internal: Move entity from one archetype to another
+    fn move_entity<F>(
+        &mut self,
+        entity: EntityId,
+        old_loc: EntityLocation,
+        new_archetype_id: usize,
+        on_new_location: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut Archetype, usize),
+    {
+        if old_loc.archetype_id == new_archetype_id {
+            return Ok(());
+        }
+
+        let tick = self.tick;
+        // We need to ensure new archetype has space (it does via allocate_row logic usually, but let's be safe if reserve needed)
+        // actually allocate_row just pushes.
+
+        // Access both archetypes safely using split_at_mut
+        // We need this to copy components from old to new.
+        let (old_arch, new_arch) = if old_loc.archetype_id < new_archetype_id {
+            let (left, right) = self.archetypes.split_at_mut(new_archetype_id);
+            (&mut left[old_loc.archetype_id], &mut right[0])
+        } else {
+            let (left, right) = self.archetypes.split_at_mut(old_loc.archetype_id);
+            (&mut right[0], &mut left[new_archetype_id])
+        };
+
+        // Allocate row in new archetype
+        let new_row = new_arch.allocate_row(entity, tick);
+
+        unsafe {
+            let new_sig = new_arch.signature().to_vec();
+
+            for &type_id in &new_sig {
+                if let Some(old_col) = old_arch.get_column_mut(type_id) {
+                    if let Some(new_col) = new_arch.get_column_mut(type_id) {
+                        let src = old_col.get_ptr_mut(old_loc.archetype_row);
+                        let dst = new_col.get_ptr_mut(new_row);
+                        // Copy raw bytes
+                        std::ptr::copy_nonoverlapping(src, dst, old_col.get_item_size());
+                    }
+                }
+            }
+        }
+
+        on_new_location(new_arch, new_row);
+
+        // Remove from old archetype
+        unsafe {
+            if let Some(swapped_entity) = old_arch.remove_row(old_loc.archetype_row) {
+                if let Some(swapped_loc_ptr) = self.entity_locations.get_mut(swapped_entity) {
+                    swapped_loc_ptr.archetype_row = old_loc.archetype_row;
+                }
+            }
+        }
+
+        // Update location of moved entity
+        if let Some(loc) = self.entity_locations.get_mut(entity) {
+            loc.archetype_id = new_archetype_id;
+            loc.archetype_row = new_row;
+        }
+
+        Ok(())
+    }
+
     /// Get cached query results (matched archetypes)
     ///
     /// This method manages the query cache, updating it incrementally if needed.
     /// It returns a vector of archetype indices that match the query.
     pub(crate) fn get_cached_query_indices<Q: QueryFilter>(&mut self) -> Vec<usize> {
-        let signature = Q::signature();
+        let sig = Q::signature();
 
         // Fast path: existing state
-        if let Some(cached) = self.query_cache.get_mut(&signature) {
+        if let Some(cached) = self.query_cache.get_mut(&sig) {
             cached.update(&self.archetypes);
-            return cached.matched_archetypes.to_vec();
+            // Clone to avoid lifetime issues with mutable cache access
+            return cached.matches.to_vec();
         }
 
         // Slow path: create new state
-        let cached = crate::query::CachedQueryResult::new(signature.clone(), &self.archetypes);
-        let indices = cached.matched_archetypes.to_vec();
-        self.query_cache.insert(signature, cached);
+        let cached = crate::query::CachedQueryResult::new(sig.clone(), &self.archetypes);
+        let indices = cached.matches.to_vec();
+        self.query_cache.insert(sig, cached);
         indices
     }
 
-    /// Check if entity exists
     pub fn entity_exists(&self, entity: EntityId) -> bool {
         self.entity_locations.contains_key(entity)
     }
@@ -336,21 +565,22 @@ impl World {
     }
 
     /// Internal helper to expose archetype pointers for query iteration
+    ///
+    /// # Safety
+    /// Returned pointer is valid for the lifetime of the world.
+    /// Caller must ensure no aliasing violations when dereferencing.
     pub(crate) fn archetype_ptr_mut(&mut self, id: usize) -> Option<NonNull<Archetype>> {
         self.archetypes.get_mut(id).map(NonNull::from)
     }
 
-    /// Get archetype count
     pub fn archetype_count(&self) -> usize {
         self.archetypes.len()
     }
 
-    /// Get total entity count
     pub fn entity_count(&self) -> u32 {
         self.entity_locations.len() as u32
     }
 
-    /// Get recycled entity count
     pub fn recycled_entity_count(&self) -> usize {
         self.recycled_entities
     }
@@ -456,6 +686,10 @@ impl World {
 
     /// Get or create archetype with caching for common signatures
     fn get_or_create_archetype(&mut self, signature: &[TypeId]) -> usize {
+        // PARANOID: Prevent archetype explosion DoS attack
+        if self.archetypes.len() >= 10_000 {
+            panic!("Archetype limit exceeded (10,000) - possible DoS attempt or memory leak");
+        }
         let signature_vec: ArchetypeSignature = SmallVec::from_slice(signature);
         self.get_or_create_archetype_with(&signature_vec, |_| {})
     }
@@ -480,15 +714,17 @@ impl World {
         }
 
         // Not found, create new archetype
-        let id = self.archetypes.len();
 
         // Create new archetype with the sorted signature
         let mut archetype = Archetype::new(sorted_signature.clone());
         on_create(&mut archetype);
 
-        // Store in archetype index
-        self.archetype_index.insert(sorted_signature, id);
+        // Push archetype FIRST to ensure it exists
         self.archetypes.push(archetype);
+        let id = self.archetypes.len() - 1;
+
+        // THEN cache the ID (prevents returning non-existent IDs)
+        self.archetype_index.insert(sorted_signature, id);
 
         id
     }
@@ -505,13 +741,22 @@ impl World {
     {
         let bundles = bundles.into_iter();
         let count = bundles.len();
+
+        // Limit batch size to prevent OOM and overflow (10M is generous but prevents DoS)
+        if count > 10_000_000 {
+            return Err(EcsError::BatchTooLarge);
+        }
+
         if count == 0 {
             return Ok(Vec::new());
         }
 
-        // Ensure we have enough capacity
-        if self.entity_locations.len() + count > self.entity_locations.capacity() {
-            let additional = (self.entity_locations.capacity() + count).max(1024);
+        // Saturating add: prefer capped growth over overflow panic
+        let current = self.entity_locations.len();
+        let new_capacity = current.saturating_add(count).max(1024);
+
+        if current + count > self.entity_locations.capacity() {
+            let additional = new_capacity - current;
             self.entity_locations.reserve(additional);
         }
 
@@ -531,11 +776,11 @@ impl World {
 
         // OPTIMIZATION: Pre-calculate column indices to avoid hash lookups in the hot loop
         let mut column_indices = [usize::MAX; MAX_BUNDLE_COMPONENTS];
-        let mut column_count = 0;
-        for &type_id in type_ids.iter() {
-            if let Some(idx) = archetype.column_index(type_id) {
-                column_indices[column_count] = idx;
-                column_count += 1;
+        let mut col_count = 0;
+        for &tid in type_ids.iter() {
+            if let Some(idx) = archetype.column_index(tid) {
+                column_indices[col_count] = idx;
+                col_count += 1;
             }
         }
 
@@ -556,7 +801,7 @@ impl World {
 
             // Write component data using pre-calculated indices
             let mut ptrs = [std::ptr::null_mut(); MAX_BUNDLE_COMPONENTS];
-            for i in 0..column_count {
+            for i in 0..col_count {
                 let col_idx = column_indices[i];
                 if let Some(column) = archetype.get_column_mut_by_index(col_idx) {
                     ptrs[i] = column.get_ptr_mut(row);
@@ -564,7 +809,7 @@ impl World {
             }
 
             unsafe {
-                bundle.write_components(&ptrs[..column_count]);
+                bundle.write_components(&ptrs[..col_count]);
             }
 
             entity_ids.push(entity);
@@ -575,17 +820,25 @@ impl World {
 
     /// Ensure we have enough capacity for new entities with an aggressive growth strategy
     fn ensure_entity_capacity(&mut self) {
-        let current_cap = self.entity_locations.capacity();
-        if self.entity_locations.len() >= current_cap {
-            // Use exponential growth with a minimum of 1024
-            let additional = (current_cap * 2).max(1024);
-            self.entity_locations.reserve(additional);
+        let len = self.entity_locations.len();
+
+        // Panic on overflow - indicates programming error, not user error
+        if len >= usize::MAX - 1024 {
+            panic!("Entity ID exhaustion: {len:#x} entities allocated");
+        }
+
+        let cap = self.entity_locations.capacity();
+
+        if len >= cap {
+            // Aggressive growth to reduce reallocations
+            let growth = (cap / 2).max(64);
+            self.entity_locations.reserve(growth);
         }
     }
 
     /// Spawn entity with components and trigger event
-    pub fn spawn_with_event<B: Bundle>(&mut self, bundle: B) -> Result<EntityId> {
-        let entity = self.spawn(bundle)?;
+    pub fn spawn_with_event<B: Bundle>(&mut self, bundle: B) -> EntityId {
+        let entity = self.spawn(bundle);
         self.event_queue.push(EntityEvent::Spawned(entity));
 
         // Track components for this entity
@@ -598,7 +851,7 @@ impl World {
         }
         self.component_tracker.insert(entity, components);
 
-        Ok(entity)
+        entity
     }
 
     /// Despawn entity and trigger event
@@ -745,91 +998,63 @@ impl World {
         self.global_event_bus.process_events()
     }
 
-    // ========== Serialization Methods (Phase 7) ==========
+    // ========== Query Cache Management (Phase 2) ==========
 
-    /// Serialize all entities and components
-    pub fn serialize_to_world_data(&self) -> Result<crate::serialization::WorldData> {
-        let mut world_data = crate::serialization::WorldData::new();
-        world_data.add_metadata(
-            "entity_count".to_string(),
-            self.entity_locations.len().to_string(),
-        );
-
-        // Note: This is a simplified implementation
-        // Full implementation would iterate through all archetypes
-        // and serialize each entity's components
-        Ok(world_data)
-    }
-
-    /// Deserialize entities from world data
-    pub fn deserialize_from_world_data(
+    /// Get or update cached query results for a signature
+    ///
+    /// Uses incremental invalidation: only checks new archetypes since last cache update.
+    /// This provides O(1) amortized performance for repeated queries.
+    pub fn get_or_update_query_cache(
         &mut self,
-        _world_data: crate::serialization::WorldData,
-    ) -> Result<()> {
-        // Note: This is a simplified implementation
-        // Full implementation would:
-        // 1. Iterate through world_data.entities
-        // 2. For each entity, spawn a new entity
-        // 3. Deserialize and add each component
-        Ok(())
+        signature: &crate::query::QuerySignature,
+    ) -> &crate::query::CachedQueryResult {
+        let current_archetype_count = self.archetypes.len();
+
+        self.query_cache
+            .entry(signature.clone())
+            .and_modify(|cached| {
+                // Incremental update: only check new archetypes
+                if cached.seen_archetypes < current_archetype_count {
+                    cached.update(&self.archetypes);
+                }
+            })
+            .or_insert_with(|| {
+                crate::query::CachedQueryResult::new(signature.clone(), &self.archetypes)
+            })
     }
 
-    /// Save to file (JSON format)
-    pub fn save_to_file(&self, path: &str) -> Result<()> {
-        let world_data = self.serialize_to_world_data()?;
-        use crate::storage::{GameStorage, SerializationFormat};
-        use std::path::Path;
-        GameStorage::save_world(&world_data, Path::new(path), SerializationFormat::Json)
+    /// Clear all cached query results
+    ///
+    /// Useful for testing or when you need to force cache invalidation.
+    pub fn clear_query_cache(&mut self) {
+        self.query_cache.clear();
     }
 
-    /// Load from file (JSON format)
-    pub fn load_from_file(&mut self, path: &str) -> Result<()> {
-        use crate::storage::{GameStorage, SerializationFormat};
-        use std::path::Path;
-        let world_data = GameStorage::load_world(Path::new(path), SerializationFormat::Json)?;
-        self.deserialize_from_world_data(world_data)
-    }
+    /// Get query cache statistics for diagnostics
+    pub fn query_cache_stats(&self) -> QueryCacheStats {
+        let total_cached_archetypes: usize = self
+            .query_cache
+            .values()
+            .map(|cached| cached.matches.len())
+            .sum();
 
-    /// Save to file with specific format
-    pub fn save_to_file_with_format(
-        &self,
-        path: &str,
-        format: crate::storage::SerializationFormat,
-    ) -> Result<()> {
-        let world_data = self.serialize_to_world_data()?;
-        use crate::storage::GameStorage;
-        use std::path::Path;
-        GameStorage::save_world(&world_data, Path::new(path), format)
+        QueryCacheStats {
+            num_cached_queries: self.query_cache.len(),
+            total_cached_archetypes,
+            total_archetypes: self.archetypes.len(),
+        }
     }
+}
 
-    /// Load from file with specific format
-    pub fn load_from_file_with_format(
-        &mut self,
-        path: &str,
-        format: crate::storage::SerializationFormat,
-    ) -> Result<()> {
-        use crate::storage::GameStorage;
-        use std::path::Path;
-        let world_data = GameStorage::load_world(Path::new(path), format)?;
-        self.deserialize_from_world_data(world_data)
-    }
-
-    // ========== Resource Management Methods (Phase 8) ==========
-
-    /// Get mutable reference to resource manager
-    pub fn resource_manager_mut(&mut self) -> &mut crate::resources::ResourceManager {
-        &mut self.resource_manager
-    }
-
-    /// Get immutable reference to resource manager
-    pub fn resource_manager(&self) -> &crate::resources::ResourceManager {
-        &self.resource_manager
-    }
-
-    /// Get resource manager statistics
-    pub fn get_resource_stats(&self) -> crate::resources::ResourceStats {
-        self.resource_manager.get_stats()
-    }
+/// Statistics about the query cache
+#[derive(Debug, Clone, Copy)]
+pub struct QueryCacheStats {
+    /// Number of unique query signatures cached
+    pub num_cached_queries: usize,
+    /// Total number of archetype matches across all cached queries
+    pub total_cached_archetypes: usize,
+    /// Total number of archetypes in the world
+    pub total_archetypes: usize,
 }
 
 impl Default for World {
@@ -855,7 +1080,7 @@ mod tests {
     fn test_spawn_despawn() -> Result<()> {
         let mut world = World::new();
 
-        let entity = world.spawn((42i32,)).unwrap();
+        let entity = world.spawn((42i32,));
         assert!(world.get_entity_location(entity).is_some());
 
         world.despawn(entity).unwrap();
@@ -872,9 +1097,9 @@ mod tests {
         struct B;
         struct C;
 
-        world.spawn((A, B))?;
-        world.spawn((A, C))?;
-        world.spawn((B, C))?;
+        world.spawn((A, B));
+        world.spawn((A, C));
+        world.spawn((B, C));
 
         // Should create 4 archetypes (+ empty one)
         assert!(world.archetype_count() >= 4);

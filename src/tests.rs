@@ -36,7 +36,7 @@ mod tests {
         }
 
         // Spawn entity
-        let entity = world.spawn((Position { x: 1.0, y: 2.0 },))?;
+        let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
         assert!(world.get_entity_location(entity).is_some());
 
         // Despawn entity
@@ -56,7 +56,7 @@ mod tests {
             y: f32,
         }
 
-        let entity = world.spawn((Position { x: 1.0, y: 2.0 },)).unwrap();
+        let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
 
         // Despawn should succeed
         world.despawn(entity)?;
@@ -79,10 +79,10 @@ mod tests {
         struct C;
 
         // Spawn entities with different component sets
-        world.spawn((A, B)).unwrap();
-        world.spawn((A, C)).unwrap();
-        world.spawn((B, C)).unwrap();
-        world.spawn((A, B, C)).unwrap();
+        world.spawn((A, B));
+        world.spawn((A, C));
+        world.spawn((B, C));
+        world.spawn((A, B, C));
 
         // Should create at least 4 archetypes (+ empty one)
         assert!(world.archetype_count() >= 4);
@@ -95,7 +95,7 @@ mod tests {
         #[allow(dead_code)]
         struct Comp;
 
-        let entity = world.spawn((Comp,)).unwrap();
+        let entity = world.spawn((Comp,));
         let location = world.get_entity_location(entity).unwrap();
 
         assert_eq!(location.archetype_id, 1); // First non-empty archetype
@@ -108,7 +108,7 @@ mod tests {
 
         struct Comp;
 
-        let entity = world.spawn((Comp,)).unwrap();
+        let entity = world.spawn((Comp,));
         assert!(world.entity_exists(entity));
 
         world.despawn(entity)?;
@@ -140,20 +140,16 @@ mod tests {
         struct Health(u32);
 
         // Spawn with 3 components
-        let e1 = world
-            .spawn((
-                Position { x: 0.0, y: 0.0 },
-                Velocity { x: 1.0, y: 1.0 },
-                Health(100),
-            ))
-            .unwrap();
+        let e1 = world.spawn((
+            Position { x: 0.0, y: 0.0 },
+            Velocity { x: 1.0, y: 1.0 },
+            Health(100),
+        ));
 
         assert!(world.entity_exists(e1));
 
         // Spawn with 2 components
-        let e2 = world
-            .spawn((Position { x: 5.0, y: 5.0 }, Health(50)))
-            .unwrap();
+        let e2 = world.spawn((Position { x: 5.0, y: 5.0 }, Health(50)));
 
         assert!(world.entity_exists(e2));
         assert_eq!(world.archetype_count(), 3); // empty + 3comp + 2comp
@@ -167,7 +163,7 @@ mod tests {
 
         assert_eq!(world.entity_count(), 0);
 
-        let entities: Vec<_> = (0..10).map(|_| world.spawn((Comp,)).unwrap()).collect();
+        let entities: Vec<_> = (0..10).map(|_| world.spawn((Comp,))).collect();
 
         assert_eq!(world.entity_count(), 10);
 
@@ -185,7 +181,7 @@ mod tests {
 
         struct Comp;
 
-        let e1 = world.spawn((Comp,)).unwrap();
+        let e1 = world.spawn((Comp,));
         assert_eq!(world.recycled_entity_count(), 0);
 
         world.despawn(e1)?;
@@ -193,7 +189,7 @@ mod tests {
         assert_eq!(world.recycled_entity_count(), 1);
 
         // Spawn again should reuse the ID
-        let e2 = world.spawn((Comp,)).unwrap();
+        let e2 = world.spawn((Comp,));
         assert_eq!(world.recycled_entity_count(), 0);
         // Slotmap keys are opaque; ensure entity now exists again
         assert!(world.entity_exists(e2));
@@ -254,7 +250,7 @@ mod tests {
         }
 
         let state = QueryState::<(&Position, &Velocity)>::new(&world);
-        assert!(state.matched_archetype_count() > 0);
+        assert!(state.match_count() > 0);
     }
 
     #[test]
@@ -328,9 +324,7 @@ mod tests {
             y: f32,
         }
 
-        let entity = world
-            .spawn((Position { x: 1.0, y: 2.0 },))
-            .expect("spawn should succeed");
+        let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
 
         let pos = world
             .get_component::<Position>(entity)
@@ -353,9 +347,7 @@ mod tests {
             x: f32,
         }
 
-        let entity = world
-            .spawn((Position { x: 3.0 }, Velocity { x: 4.0 }))
-            .expect("spawn should succeed");
+        let entity = world.spawn((Position { x: 3.0 }, Velocity { x: 4.0 }));
 
         let (pos, vel) = world
             .get_components::<(&Position, &Velocity)>(entity)
@@ -374,9 +366,7 @@ mod tests {
             x: f32,
         }
 
-        let entity = world
-            .spawn((Position { x: 0.0 },))
-            .expect("spawn should succeed");
+        let entity = world.spawn((Position { x: 0.0 },));
 
         {
             let pos = world
@@ -401,9 +391,7 @@ mod tests {
         #[derive(Debug, PartialEq)]
         struct Velocity(f32);
 
-        let entity = world
-            .spawn((Position(1.0), Velocity(2.0)))
-            .expect("spawn should succeed");
+        let entity = world.spawn((Position(1.0), Velocity(2.0)));
 
         {
             let (pos, vel) = world
@@ -431,9 +419,7 @@ mod tests {
         struct Velocity(f32);
 
         for i in 0..10 {
-            let _ = world
-                .spawn((Position(i as f32), Velocity(1.0)))
-                .expect("spawn should succeed");
+            let _ = world.spawn((Position(i as f32), Velocity(1.0)));
         }
 
         {
@@ -500,9 +486,7 @@ mod tests {
     #[test]
     fn test_executor_runs_systems_in_order() {
         let mut world = World::new();
-        let entity = world
-            .spawn((LogComponent::default(),))
-            .expect("spawn log entity");
+        let entity = world.spawn((LogComponent::default(),));
 
         let schedule = Schedule::new()
             .with_system(Box::new(LoggingSystem { name: "first" }))
@@ -528,9 +512,7 @@ mod tests {
     #[test]
     fn test_executor_propagates_errors_and_stops() {
         let mut world = World::new();
-        let entity = world
-            .spawn((LogComponent::default(),))
-            .expect("spawn log entity");
+        let entity = world.spawn((LogComponent::default(),));
 
         let schedule = Schedule::new()
             .with_system(Box::new(LoggingSystem { name: "first" }))

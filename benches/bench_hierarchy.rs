@@ -1,4 +1,4 @@
-use archetype_ecs::{Children, GlobalTransform, LocalTransform, Vec3, World};
+use archetype_ecs::{Children, GlobalTransform, LocalTransform, Quat, Vec3, World};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn bench_flat_entities(c: &mut Criterion) {
@@ -6,11 +6,7 @@ fn bench_flat_entities(c: &mut Criterion) {
         b.iter(|| {
             let mut world = World::new();
             for _ in 0..1000 {
-                black_box(
-                    world
-                        .spawn((LocalTransform::identity(), GlobalTransform::identity()))
-                        .unwrap(),
-                );
+                black_box(world.spawn((LocalTransform::identity(), GlobalTransform::identity())));
             }
         })
     });
@@ -20,22 +16,14 @@ fn bench_hierarchy_creation(c: &mut Criterion) {
     c.bench_function("hierarchy_1_root_100_children", |b| {
         b.iter(|| {
             let mut world = World::new();
-            let _root = black_box(
-                world
-                    .spawn((
-                        LocalTransform::identity(),
-                        GlobalTransform::identity(),
-                        Children::new(),
-                    ))
-                    .unwrap(),
-            );
+            let _root = black_box(world.spawn((
+                LocalTransform::identity(),
+                GlobalTransform::identity(),
+                Children::new(),
+            )));
 
             for _ in 0..100 {
-                black_box(
-                    world
-                        .spawn((LocalTransform::identity(), GlobalTransform::identity()))
-                        .unwrap(),
-                );
+                black_box(world.spawn((LocalTransform::identity(), GlobalTransform::identity())));
             }
         })
     });
@@ -45,17 +33,12 @@ fn bench_hierarchy_deep_tree(c: &mut Criterion) {
     c.bench_function("hierarchy_deep_20_levels", |b| {
         b.iter(|| {
             let mut world = World::new();
-            let mut _parent = black_box(
-                world
-                    .spawn((LocalTransform::identity(), GlobalTransform::identity()))
-                    .unwrap(),
-            );
+            let mut _parent =
+                black_box(world.spawn((LocalTransform::identity(), GlobalTransform::identity())));
 
             for _ in 0..20 {
                 let child = black_box(
-                    world
-                        .spawn((LocalTransform::identity(), GlobalTransform::identity()))
-                        .unwrap(),
+                    world.spawn((LocalTransform::identity(), GlobalTransform::identity())),
                 );
                 _parent = child;
             }
@@ -67,14 +50,14 @@ fn bench_transform_operations(c: &mut Criterion) {
     c.bench_function("transform_local_to_global", |b| {
         let parent = GlobalTransform {
             position: Vec3::new(100.0, 200.0, 0.0),
-            rotation: archetype_ecs::Quat::identity(),
-            scale: Vec3::one(),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
         };
 
         let child = LocalTransform {
             position: Vec3::new(10.0, 20.0, 0.0),
-            rotation: archetype_ecs::Quat::identity(),
-            scale: Vec3::one(),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
         };
 
         b.iter(|| {

@@ -85,7 +85,17 @@ macro_rules! impl_bundle {
     };
 }
 
-// Implement for tuples of 1-8 components
+// Implement for 0-8 components
+impl Bundle for () {
+    fn type_ids() -> SmallVec<[TypeId; MAX_BUNDLE_COMPONENTS]> {
+        smallvec![]
+    }
+
+    fn register_components(_: &mut Archetype) {}
+
+    unsafe fn write_components(self, _: &[*mut u8]) {}
+}
+
 impl_bundle!(A);
 impl_bundle!(A, B);
 impl_bundle!(A, B, C);

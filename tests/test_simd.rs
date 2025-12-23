@@ -13,13 +13,11 @@ fn test_chunk_slice_access() {
 
     // Spawn 100 entities
     for i in 0..100 {
-        world
-            .spawn((Position {
-                x: i as f32,
-                y: 0.0,
-                z: 0.0,
-            },))
-            .unwrap();
+        world.spawn((Position {
+            x: i as f32,
+            y: 0.0,
+            z: 0.0,
+        },));
     }
 
     // Use par_for_each_chunk to update positions
@@ -44,20 +42,16 @@ fn test_chunk_slice_access() {
 #[test]
 fn test_simd_slice_access() {
     let mut world = World::new();
-    world
-        .spawn((Position {
-            x: 1.0,
-            y: 2.0,
-            z: 3.0,
-        },))
-        .unwrap();
-    world
-        .spawn((Position {
-            x: 4.0,
-            y: 5.0,
-            z: 6.0,
-        },))
-        .unwrap();
+    world.spawn((Position {
+        x: 1.0,
+        y: 2.0,
+        z: 3.0,
+    },));
+    world.spawn((Position {
+        x: 4.0,
+        y: 5.0,
+        z: 6.0,
+    },));
 
     let mut query = world.query_mut::<&mut Position>();
     query.par_for_each_chunk(|mut chunk| {

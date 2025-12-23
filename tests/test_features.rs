@@ -26,7 +26,7 @@ fn test_change_detection() {
     let mut query = CachedQuery::<(Read<Position>, Changed<Position>)>::new(&world);
 
     // Spawn entity
-    let _entity = world.spawn((Position { x: 0.0, y: 0.0 },)).unwrap();
+    let _entity = world.spawn((Position { x: 0.0, y: 0.0 },));
 
     // First run: should be detected as changed (added is also changed)
     let count = query.iter(&world).count();
@@ -58,7 +58,7 @@ fn test_added_detection() {
     let mut query = CachedQuery::<(Read<Position>, Added<Position>)>::new(&world);
 
     // Spawn entity
-    world.spawn((Position { x: 0.0, y: 0.0 },)).unwrap();
+    world.spawn((Position { x: 0.0, y: 0.0 },));
 
     // First run: detected
     assert_eq!(query.iter(&world).count(), 1);
