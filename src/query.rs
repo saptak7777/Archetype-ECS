@@ -979,15 +979,12 @@ where
         }
     }
 
-    /// Iterate query - creates temporary QueryState
-    ///
-    /// This is simpler but less efficient than creating QueryState once
-    /// and reusing it across frames
+    /// Iterate query - uses world cache for performance
     pub fn iter(&self) -> QueryIterOwned<'w, Q> {
-        let state = QueryState::<Q>::new(self.world);
+        let matched = self.world.get_cached_query_indices::<Q>();
         QueryIterOwned {
             world: self.world,
-            matches: state.matches,
+            matches: matched,
             archetype_index: 0,
             entity_index: 0,
             change_tick: 0, // Stateless query matches everything
@@ -996,9 +993,14 @@ where
         }
     }
 
-    /// Count matching entities
+    /// Count matching entities - uses world cache
     pub fn count(&self) -> usize {
-        self.iter().len()
+        let matched = self.world.get_cached_query_indices::<Q>();
+        matched
+            .iter()
+            .filter_map(|&id| self.world.get_archetype(id))
+            .map(|arch| arch.len())
+            .sum()
     }
 }
 

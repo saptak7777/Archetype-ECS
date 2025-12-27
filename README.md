@@ -147,7 +147,7 @@ Archetype ECS is designed for speed.
 - **Change Detection**: Bitset-based filtering makes reactive systems negligible in cost.
 - **Fragmentation**: Archetype moves are somewhat expensive, so distinct "States" (like `Walking` vs `Flying` components) should be used judiciously.
 
-*(Benchmarks running on Intel Core i9-13900K, 100k entities)*
+*(Benchmarks running on Intel Core i5-11400f, 100k entities)*
 - **Simple Iteration**: ~0.5ns / entity
 - **Composed Query**: ~1.2ns / entity
 - **Parallel Dispatch**: Scales linearly with cores for disjoint data.

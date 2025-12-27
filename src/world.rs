@@ -18,6 +18,7 @@ use ahash::AHashMap;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 use std::any::TypeId;
+use std::cell::RefCell;
 use std::ptr::NonNull;
 
 #[cfg(feature = "profiling")]
@@ -73,7 +74,7 @@ pub struct World {
 
     /// Query result cache to avoid O(n) archetype scanning
     /// Maps generic Query type ID to QueryState
-    query_cache: AHashMap<crate::query::QuerySignature, crate::query::CachedQueryResult>,
+    query_cache: RefCell<AHashMap<crate::query::QuerySignature, crate::query::CachedQueryResult>>,
 }
 
 impl World {
@@ -98,12 +99,14 @@ impl World {
             removal_queue: Vec::new(),
             resources: AHashMap::new(),
             // Pre-allocate query cache - trades memory for speed (most apps have <100 unique queries)
-            query_cache: AHashMap::with_capacity(32),
+            query_cache: RefCell::new(AHashMap::with_capacity(32)),
         };
 
         // Bootstrap the empty archetype (entities with no components)
         // This is always at index 0 and simplifies logic elsewhere
-        world.get_or_create_archetype(&[]);
+        world.get_or_create_archetype_with(&ArchetypeSignature::new(), |arch| {
+            arch.mark_columns_initialized();
+        });
         world
     }
 
@@ -369,35 +372,57 @@ impl World {
     ///
     /// This is an expensive operation as it moves the entity to a new archetype.
     pub fn remove_component<T: Component>(&mut self, entity: EntityId) -> Result<()> {
-        let location = *self
+        let old_location = self
             .entity_locations
             .get(entity)
+            .copied()
             .ok_or(EcsError::EntityNotFound)?;
-        let old_archetype = &self.archetypes[location.archetype_id];
+        let old_archetype = &self.archetypes[old_location.archetype_id];
 
-        if !old_archetype.has_column(TypeId::of::<T>()) {
+        // PRE-CONDITION: Verify component exists on entity
+        let component_type_id = TypeId::of::<T>();
+        if !old_archetype.has_column(component_type_id) {
             return Err(EcsError::ComponentNotFound);
         }
 
-        let mut new_signature = old_archetype.signature().to_vec();
-        if let Some(idx) = new_signature.iter().position(|&t| t == TypeId::of::<T>()) {
-            new_signature.swap_remove(idx);
+        // Build new signature (excluding component T)
+        let mut new_signature = old_archetype.signature().clone();
+        new_signature.retain(|tid| *tid != component_type_id);
+
+        // Capture existing columns to replicate them in new archetype.
+        // This must be done before we potentially push to self.archetypes.
+        let mut columns_to_add = Vec::with_capacity(new_signature.len());
+        for &type_id in &new_signature {
+            if let Some(col) = old_archetype.get_column(type_id) {
+                columns_to_add.push((type_id, col.clone_empty()));
+            }
         }
 
-        let new_archetype_id = self.get_or_create_archetype(&new_signature);
+        let new_archetype_id = self.get_or_create_archetype_with(&new_signature, |new_arch| {
+            for (type_id, col) in columns_to_add {
+                new_arch.add_column_raw(type_id, col);
+            }
+            new_arch.mark_columns_initialized();
+        });
 
-        // Move entity
-        // The new archetype won't have the component column, so it gets dropped implicitly
-        // But we need to make sure we run the destructor for the removed component?
-        // Our move_entity implementation logic needs to handle this.
-        // Actually, move_entity usually copies OVERLAPPING components.
-        // The component T is NOT in the new archetype, so it won't be copied.
-        // We must manually drop it from the old row if we are treating it as "moved out".
-        // However, since we are moving the entity, the old row in the old archetype is removed.
-        // Archetype::remove_row swaps with last and drops.
-        // BUT move_entity usually does "copy to new" then "remove from old".
+        // POST-CONDITION: Verify destination archetype is ready
+        #[cfg(debug_assertions)]
+        {
+            let arch = &self.archetypes[new_archetype_id];
+            debug_assert!(
+                arch.columns_initialized(),
+                "BUG: Destination archetype columns not initialized"
+            );
+            for &tid in arch.signature() {
+                debug_assert!(
+                    arch.has_column(tid),
+                    "BUG: Destination archetype missing column for type {tid:?}"
+                );
+            }
+        }
 
-        self.move_entity(entity, location, new_archetype_id, |_, _| {})
+        // Safe migration: move entity and drop the removed component implicitly
+        self.move_entity(entity, old_location, new_archetype_id, |_, _| {})
     }
 
     /// Get multiple immutable components at once using QueryFetch
@@ -433,7 +458,6 @@ impl World {
         QueryMut::new(self)
     }
 
-    /// Create an immutable query wrapper for the provided filter
     pub fn query<'w, Q>(&'w self) -> Query<'w, Q>
     where
         Q: QueryFilter + QueryFetch<'w>,
@@ -523,20 +547,24 @@ impl World {
     ///
     /// This method manages the query cache, updating it incrementally if needed.
     /// It returns a vector of archetype indices that match the query.
-    pub(crate) fn get_cached_query_indices<Q: QueryFilter>(&mut self) -> Vec<usize> {
+    /// It returns a vector of archetype indices that match the query.
+    pub(crate) fn get_cached_query_indices<Q: QueryFilter>(&self) -> Vec<usize> {
         let sig = Q::signature();
 
         // Fast path: existing state
-        if let Some(cached) = self.query_cache.get_mut(&sig) {
-            cached.update(&self.archetypes);
-            // Clone to avoid lifetime issues with mutable cache access
-            return cached.matches.to_vec();
+        {
+            let mut cache = self.query_cache.borrow_mut();
+            if let Some(cached) = cache.get_mut(&sig) {
+                cached.update(&self.archetypes);
+                // Clone to avoid lifetime issues with mutable cache access
+                return cached.matches.to_vec();
+            }
         }
 
         // Slow path: create new state
         let cached = crate::query::CachedQueryResult::new(sig.clone(), &self.archetypes);
         let indices = cached.matches.to_vec();
-        self.query_cache.insert(sig, cached);
+        self.query_cache.borrow_mut().insert(sig, cached);
         indices
     }
 
@@ -615,7 +643,7 @@ impl World {
         self.archetypes.clear();
         self.archetype_index.clear();
         self.transitions.clear();
-        self.query_cache.clear();
+        self.query_cache.borrow_mut().clear();
 
         // Recreate empty archetype
         self.get_or_create_archetype(&[]); // FIXED
@@ -1004,42 +1032,42 @@ impl World {
     ///
     /// Uses incremental invalidation: only checks new archetypes since last cache update.
     /// This provides O(1) amortized performance for repeated queries.
-    pub fn get_or_update_query_cache(
-        &mut self,
+    pub fn get_cached_query_indices_by_sig(
+        &self,
         signature: &crate::query::QuerySignature,
-    ) -> &crate::query::CachedQueryResult {
+    ) -> Vec<usize> {
         let current_archetype_count = self.archetypes.len();
+        let mut cache = self.query_cache.borrow_mut();
 
-        self.query_cache
-            .entry(signature.clone())
-            .and_modify(|cached| {
-                // Incremental update: only check new archetypes
-                if cached.seen_archetypes < current_archetype_count {
-                    cached.update(&self.archetypes);
-                }
-            })
-            .or_insert_with(|| {
-                crate::query::CachedQueryResult::new(signature.clone(), &self.archetypes)
-            })
+        if let Some(cached) = cache.get_mut(signature) {
+            if cached.seen_archetypes < current_archetype_count {
+                cached.update(&self.archetypes);
+            }
+            cached.matches.to_vec()
+        } else {
+            let cached = crate::query::CachedQueryResult::new(signature.clone(), &self.archetypes);
+            let indices = cached.matches.to_vec();
+            cache.insert(signature.clone(), cached);
+            indices
+        }
     }
 
     /// Clear all cached query results
     ///
     /// Useful for testing or when you need to force cache invalidation.
-    pub fn clear_query_cache(&mut self) {
-        self.query_cache.clear();
+    pub fn clear_query_cache(&self) {
+        self.query_cache.borrow_mut().clear();
     }
 
     /// Get query cache statistics for diagnostics
+    /// Get query cache statistics for diagnostics
     pub fn query_cache_stats(&self) -> QueryCacheStats {
-        let total_cached_archetypes: usize = self
-            .query_cache
-            .values()
-            .map(|cached| cached.matches.len())
-            .sum();
+        let cache = self.query_cache.borrow();
+        let total_cached_archetypes: usize =
+            cache.values().map(|cached| cached.matches.len()).sum();
 
         QueryCacheStats {
-            num_cached_queries: self.query_cache.len(),
+            num_cached_queries: cache.len(),
             total_cached_archetypes,
             total_archetypes: self.archetypes.len(),
         }

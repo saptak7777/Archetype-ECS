@@ -73,7 +73,7 @@ fn test_query_cache_incremental_invalidation() {
 
     // Verify cache was updated, not rebuilt
     let stats = world.query_cache_stats();
-    assert!(stats.num_cached_queries >= 0);
+    assert!(stats.num_cached_queries >= 1);
 }
 
 #[test]

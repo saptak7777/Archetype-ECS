@@ -180,20 +180,18 @@ impl Archetype {
                 let last_idx = column.len() - 1;
                 if row < last_idx {
                     // SAFETY: This pointer arithmetic is safe because:
-                    // 1. last_idx < column.len() (from len() - 1)
+                    // 1. last_idx < column.len()
                     // 2. row < last_idx (checked above)
                     // 3. Both offsets are within allocated buffer bounds
-                    // 4. item_size is the correct size for type T (set in new())
-                    // 5. copy_nonoverlapping is safe because src != dst (row < last_idx)
-                    let src = column.data.as_ptr().add(last_idx * item_size);
-                    let dst = column.data.as_mut_ptr().add(row * item_size);
-                    std::ptr::copy_nonoverlapping(src, dst, item_size);
+                    // 4. item_size is the correct size for type
+                    // 5. copy_nonoverlapping is safe because src != dst
+                    unsafe {
+                        let src = column.ptr.add(last_idx * item_size);
+                        let dst = column.ptr.add(row * item_size);
+                        std::ptr::copy_nonoverlapping(src, dst, item_size);
+                    }
                 }
-                // SAFETY: Truncating to last_idx * item_size is safe because:
-                // 1. last_idx = len() - 1, so last_idx * item_size < data.len()
-                // 2. We're removing exactly one element worth of bytes
-                // 3. The data at last_idx was already moved (if row < last_idx)
-                column.data.set_len(last_idx * item_size);
+                column.len = last_idx;
             }
             // Fix: Keep ticks in sync with entities using swap_remove
             // We use simple swap_remove because the order doesn't matter (sparse set)
@@ -273,11 +271,31 @@ impl Archetype {
             // Pre-allocate all columns together to avoid fragmentation
             self.entities.reserve(additional);
             for column in &mut self.components {
-                // Prevent overflow: fallback to minimal reservation on overflow
-                let byte_count = additional
-                    .checked_mul(column.item_size)
-                    .unwrap_or(column.item_size);
-                column.data.reserve(byte_count);
+                // Reserve additional items (converted to bytes for the raw pointer)
+                if column.item_size > 0 {
+                    let required_len = (column.len + additional) * column.item_size;
+                    if required_len > column.cap {
+                        let new_cap = required_len.next_power_of_two().max(64);
+                        let new_layout =
+                            std::alloc::Layout::from_size_align(new_cap, column.align).unwrap();
+
+                        let new_ptr = if column.cap == 0 {
+                            unsafe { std::alloc::alloc(new_layout) }
+                        } else {
+                            let old_layout =
+                                std::alloc::Layout::from_size_align(column.cap, column.align)
+                                    .unwrap();
+                            unsafe { std::alloc::realloc(column.ptr, old_layout, new_cap) }
+                        };
+
+                        if new_ptr.is_null() {
+                            std::alloc::handle_alloc_error(new_layout);
+                        }
+
+                        column.ptr = new_ptr;
+                        column.cap = new_cap;
+                    }
+                }
                 column.added_ticks.reserve(additional);
                 column.changed_ticks.reserve(additional);
             }
@@ -383,8 +401,12 @@ impl Archetype {
 
 /// Type-erased component column
 pub struct ComponentColumn {
-    data: Vec<u8>,
+    ptr: *mut u8,
+    len: usize, // number of initialized components
+    cap: usize, // capacity in bytes
     item_size: usize,
+    /// Alignment of the component type
+    align: usize,
     drop_fn: Option<unsafe fn(*mut u8)>,
     pub(crate) added_ticks: Vec<u32>,
     pub(crate) changed_ticks: Vec<u32>,
@@ -396,6 +418,11 @@ pub struct ComponentColumn {
     last_change_tick: u32,
 }
 
+// SAFETY: We manually manage the raw pointer and ensure thread safety
+// through the world's borrowing rules.
+unsafe impl Send for ComponentColumn {}
+unsafe impl Sync for ComponentColumn {}
+
 impl ComponentColumn {
     /// Create new column for type T
     ///
@@ -403,8 +430,11 @@ impl ComponentColumn {
     /// The column stores components as raw bytes and maintains a drop function for cleanup.
     pub fn new<T: Component>() -> Self {
         Self {
-            data: Vec::new(),
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
             item_size: std::mem::size_of::<T>(),
+            align: std::mem::align_of::<T>(),
             // Store a drop function only if T needs drop
             // This is critical for proper cleanup of components with destructors
             drop_fn: if std::mem::needs_drop::<T>() {
@@ -434,8 +464,11 @@ impl ComponentColumn {
     /// Create an empty clone of this column (preserving type info but with no data)
     pub(crate) fn clone_empty(&self) -> Self {
         Self {
-            data: Vec::new(),
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
             item_size: self.item_size,
+            align: self.align,
             drop_fn: self.drop_fn,
             added_ticks: Vec::new(),
             changed_ticks: Vec::new(),
@@ -460,26 +493,38 @@ impl ComponentColumn {
     /// 2. Not use the pointer after any operation that might reallocate the buffer
     /// 3. Ensure the written value matches the column's component type
     pub fn get_ptr_mut(&mut self, index: usize) -> *mut u8 {
-        let offset = index * self.item_size;
-        if offset + self.item_size > self.data.len() {
-            // OPTIMIZATION: Use reserve + set_len to avoid zero-initializing memory
-            // that we are about to overwrite anyway.
-            // SAFETY:
-            // 1. u8 is valid for any bit pattern, so uninitialized memory is "safe" for Vec<u8>
-            //    (though reading it is UB if not careful, but we just write to it).
-            // 2. We ensure capacity before setting length.
-            let required_len = offset + self.item_size;
-            if required_len > self.data.capacity() {
-                self.data.reserve(required_len - self.data.len());
-            }
-            unsafe { self.data.set_len(required_len) };
+        // Special case for Zero-Sized Types (ZSTs)
+        // Writing to a ZST is a no-op, but the pointer must be correctly aligned
+        // to avoid Undefined Behavior.
+        if self.item_size == 0 {
+            return self.align as *mut u8;
         }
-        // SAFETY: This is safe because:
-        // 1. offset is calculated as index * item_size
-        // 2. We just ensured offset + item_size <= data.len()
-        // 3. The pointer is valid for item_size bytes
-        // 4. Vec guarantees proper alignment for u8
-        unsafe { self.data.as_mut_ptr().add(offset) }
+
+        let required_len = (index + 1) * self.item_size;
+        if required_len > self.cap {
+            let new_cap = required_len.next_power_of_two().max(64);
+            let new_layout = std::alloc::Layout::from_size_align(new_cap, self.align).unwrap();
+
+            let new_ptr = if self.cap == 0 {
+                unsafe { std::alloc::alloc(new_layout) }
+            } else {
+                let old_layout = std::alloc::Layout::from_size_align(self.cap, self.align).unwrap();
+                unsafe { std::alloc::realloc(self.ptr, old_layout, new_cap) }
+            };
+
+            if new_ptr.is_null() {
+                std::alloc::handle_alloc_error(new_layout);
+            }
+
+            self.ptr = new_ptr;
+            self.cap = new_cap;
+        }
+
+        if index >= self.len {
+            self.len = index + 1;
+        }
+
+        unsafe { self.ptr.add(index * self.item_size) }
     }
 
     /// Mark component as changed at given row
@@ -504,18 +549,24 @@ impl ComponentColumn {
     ///
     /// # Safety
     /// Returns a reference to the component if it exists and is properly initialized.
+    /// Get component at index
+    ///
+    /// # Safety
+    /// Returns a reference to the component if it exists and is properly initialized.
     pub fn get<T: Component>(&self, index: usize) -> Option<&T> {
-        let offset = index * self.item_size;
-        if offset + self.item_size > self.data.len() {
+        if index >= self.len || self.item_size == 0 {
+            // ZSTs should probably be handled more carefully if needed, but for now
+            // we return None for out of bounds. Wait, ZSTs are always "in bounds" if they exist.
+            if self.item_size == 0 && index < self.added_ticks.len() {
+                return Some(unsafe { &*(self.align as *const T) });
+            }
             return None;
         }
-        // SAFETY: This is safe because:
-        // 1. We verified offset + item_size <= data.len() (bounds check)
-        // 2. The data was written via get_ptr_mut as a valid T
-        // 3. item_size == size_of::<T>() (verified at column creation)
-        // 4. The cast is valid because this column stores type T
-        // 5. The lifetime is tied to &self, preventing use-after-free
-        Some(unsafe { &*(self.data.as_ptr().add(offset) as *const T) })
+        // SAFETY:
+        // 1. Bounds check: index < self.len
+        // 2. Pointer is properly aligned (from manual allocation)
+        // 3. item_size == size_of::<T>()
+        Some(unsafe { &*(self.ptr.add(index * self.item_size) as *const T) })
     }
 
     /// Get mutable component at index
@@ -523,32 +574,24 @@ impl ComponentColumn {
     /// # Safety
     /// Returns a mutable reference to the component if it exists and is properly initialized.
     pub fn get_mut<T: Component>(&mut self, index: usize) -> Option<&mut T> {
-        let offset = index * self.item_size;
-        if offset + self.item_size > self.data.len() {
+        if index >= self.len || self.item_size == 0 {
+            if self.item_size == 0 && index < self.added_ticks.len() {
+                return Some(unsafe { &mut *(self.align as *mut T) });
+            }
             return None;
         }
-        // SAFETY: This is safe because:
-        // 1. We verified offset + item_size <= data.len() (bounds check)
-        // 2. The data was written via get_ptr_mut as a valid T
-        // 3. item_size == size_of::<T>() (verified at column creation)
-        // 4. The cast is valid because this column stores type T
-        // 5. The lifetime is tied to &mut self, ensuring exclusive access
-        // 6. No other references to this component exist (Rust's borrow rules)
-        Some(unsafe { &mut *(self.data.as_mut_ptr().add(offset) as *mut T) })
+        // SAFETY: Same as get but mutable
+        Some(unsafe { &mut *(self.ptr.add(index * self.item_size) as *mut T) })
     }
 
     /// Number of components
     pub fn len(&self) -> usize {
-        if self.item_size == 0 {
-            0
-        } else {
-            self.data.len() / self.item_size
-        }
+        self.added_ticks.len()
     }
 
     /// Is empty
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.len() == 0
     }
     /// Get added tick for a row
     pub fn get_added_tick(&self, row: usize) -> Option<u32> {
@@ -563,6 +606,9 @@ impl ComponentColumn {
     pub fn set_changed_tick(&mut self, row: usize, tick: u32) {
         if row < self.changed_ticks.len() {
             self.changed_ticks[row] = tick;
+            if tick > self.last_change_tick {
+                self.last_change_tick = tick;
+            }
         }
     }
 
@@ -571,15 +617,11 @@ impl ComponentColumn {
     /// # Safety
     /// Returns a slice of components if the type T matches the column's type.
     pub fn get_slice<T: Component>(&self) -> Option<&[T]> {
-        if self.item_size != std::mem::size_of::<T>() {
+        if self.item_size != std::mem::size_of::<T>() || self.item_size == 0 {
             return None;
         }
-        // SAFETY:
-        // 1. We verified item_size matches size_of::<T>()
-        // 2. data is aligned for T (Vec guarantees alignment for its allocation)
-        // 3. len() is calculated based on item_size
-        // 4. Lifetime is tied to &self
-        Some(unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const T, self.len()) })
+        // SAFETY: properly aligned and bounded
+        Some(unsafe { std::slice::from_raw_parts(self.ptr as *const T, self.len) })
     }
 
     /// Get typed mutable slice of components
@@ -587,39 +629,31 @@ impl ComponentColumn {
     /// # Safety
     /// Returns a mutable slice of components if the type T matches the column's type.
     pub fn get_slice_mut<T: Component>(&mut self) -> Option<&mut [T]> {
-        if self.item_size != std::mem::size_of::<T>() {
+        if self.item_size != std::mem::size_of::<T>() || self.item_size == 0 {
             return None;
         }
-        // SAFETY:
-        // 1. We verified item_size matches size_of::<T>()
-        // 2. data is aligned for T
-        // 3. len() is calculated based on item_size
-        // 4. Lifetime is tied to &mut self (exclusive access)
-        Some(unsafe {
-            std::slice::from_raw_parts_mut(self.data.as_mut_ptr() as *mut T, self.len())
-        })
+        // SAFETY: properly aligned and bounded
+        Some(unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut T, self.len) })
     }
 }
 
 impl Drop for ComponentColumn {
-    /// Custom drop implementation to properly clean up type-erased components
-    ///
-    /// This is critical for components with destructors (e.g., Vec, String, Box)
     fn drop(&mut self) {
-        if let Some(drop_fn) = self.drop_fn {
-            let count = self.len();
-            for i in 0..count {
-                let offset = i * self.item_size;
-                // SAFETY: This is safe because:
-                // 1. offset = i * item_size where i < count = len()
-                // 2. len() returns data.len() / item_size, so offset < data.len()
-                // 3. drop_fn was created with the correct type T in new()
-                // 4. Each component was properly initialized via get_ptr_mut
-                // 5. We're dropping each component exactly once
-                // 6. This is the final cleanup, no further access will occur
-                unsafe {
-                    drop_fn(self.data.as_mut_ptr().add(offset));
+        if self.item_size > 0 && self.cap > 0 {
+            // Drop initialized elements
+            if let Some(drop_fn) = self.drop_fn {
+                for i in 0..self.len {
+                    unsafe {
+                        drop_fn(self.ptr.add(i * self.item_size));
+                    }
                 }
+            }
+
+            // Deallocate buffer
+            // SAFETY: layout is same as used for alloc/realloc
+            let layout = std::alloc::Layout::from_size_align(self.cap, self.align).unwrap();
+            unsafe {
+                std::alloc::dealloc(self.ptr, layout);
             }
         }
     }
