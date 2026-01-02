@@ -18,8 +18,8 @@ fn test_change_detection_flow() {
     let mut world = World::new();
 
     // 1. Initial Spawn (Tick = 1)
-    let e1 = world.spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 1.0 }));
-    let e2 = world.spawn((Position { x: 10.0, y: 10.0 },));
+    let e1 = world.spawn_entity((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 1.0 }));
+    let e2 = world.spawn_entity((Position { x: 10.0, y: 10.0 },));
 
     {
         // Everything is "Added" since tick 0
@@ -75,8 +75,8 @@ fn test_change_detection_flow() {
 fn test_complex_change_filter() {
     let mut world = World::new();
 
-    world.spawn((Position { x: 0.0, y: 0.0 },));
-    world.spawn((Position { x: 1.0, y: 1.0 },));
+    world.spawn_entity((Position { x: 0.0, y: 0.0 },));
+    world.spawn_entity((Position { x: 1.0, y: 1.0 },));
 
     world.increment_tick(); // Tick 2
 

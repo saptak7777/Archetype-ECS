@@ -45,8 +45,8 @@ fn bench_parallel_execution(c: &mut Criterion) {
         }));
     }
 
-    let schedule = Schedule::from_systems(systems).unwrap();
-    let mut executor = Executor::new(schedule);
+    let mut schedule = Schedule::from_systems(systems).unwrap();
+    let mut executor = Executor::new(&mut schedule);
     let mut world = World::new();
 
     group.bench_function("sequential", |b| {

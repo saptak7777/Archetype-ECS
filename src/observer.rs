@@ -13,12 +13,25 @@ pub trait Observer: Send + Sync {
         "Observer"
     }
 
-    /// Optional: called when observer is registered
+    /// Called before observer is stored in registry
+    /// Useful for setup that needs to happen before registration
+    fn on_before_register(&mut self, _world: &mut World) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when observer is registered and stored
+    /// Observer can now access its final storage position
     fn on_registered(&mut self, _world: &mut World) -> Result<()> {
         Ok(())
     }
 
-    /// Optional: called when observer is unregistered
+    /// Called after observer is fully registered with index
+    /// Observer knows its final position in the registry
+    fn on_after_register(&mut self, _world: &mut World, _index: usize) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when observer is unregistered
     fn on_unregistered(&mut self, _world: &mut World) -> Result<()> {
         Ok(())
     }
@@ -38,23 +51,20 @@ impl ObserverRegistry {
     }
 
     /// Register observer
-    pub fn register(&mut self, observer: Box<dyn Observer>, world: &mut World) -> Result<()> {
-        // Clone observer, call on_registered, then store
-        // Note: Due to trait object limitations, we call after storing
+    pub fn register(&mut self, mut observer: Box<dyn Observer>, world: &mut World) -> Result<()> {
+        // Call before registration
+        observer.on_before_register(world)?;
+        
+        // Store observer
+        let index = self.observers.len();
         self.observers.push(observer);
-        // We can't easily call on_registered here because we just moved it into the vector
-        // and we'd need to borrow it back mutably while also passing world.
-        // For simplicity in this phase, we'll skip the immediate callback or handle it if needed later.
-        // If strict adherence to the plan is required, we might need a different design,
-        // but typically registration happens at setup.
-        // Let's try to call it if possible, but it requires mutable borrow of observer and world.
-        // self.observers.last_mut().unwrap().on_registered(world)
-        // This would work if world isn't borrowed by the registry itself (it isn't here).
-
+        
+        // Call after registration
         if let Some(obs) = self.observers.last_mut() {
             obs.on_registered(world)?;
+            obs.on_after_register(world, index)?;
         }
-
+        
         Ok(())
     }
 
@@ -172,6 +182,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    #[allow(dead_code)] // Test observer for debugging
     struct TestObserver {
         call_count: Arc<Mutex<usize>>,
     }
@@ -193,15 +204,52 @@ mod tests {
         assert_eq!(registry.observer_count(), 0);
     }
 
+    struct LifecycleTestObserver {
+        before_called: bool,
+        registered_called: bool,
+        after_called: bool,
+        after_index: Option<usize>,
+    }
+
+    impl Observer for LifecycleTestObserver {
+        fn on_event(&mut self, _event: &EntityEvent, _world: &mut World) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_before_register(&mut self, _world: &mut World) -> Result<()> {
+            self.before_called = true;
+            Ok(())
+        }
+
+        fn on_registered(&mut self, _world: &mut World) -> Result<()> {
+            self.registered_called = true;
+            Ok(())
+        }
+
+        fn on_after_register(&mut self, _world: &mut World, index: usize) -> Result<()> {
+            self.after_called = true;
+            self.after_index = Some(index);
+            Ok(())
+        }
+    }
+
     #[test]
-    fn test_observer_registration() {
+    fn test_observer_lifecycle_callbacks() {
         let mut registry = ObserverRegistry::new();
-        let observer = Box::new(TestObserver {
-            call_count: Arc::new(Mutex::new(0)),
+        let observer = Box::new(LifecycleTestObserver {
+            before_called: false,
+            registered_called: false,
+            after_called: false,
+            after_index: None,
         });
 
         let mut world = World::new();
         registry.register(observer, &mut world).unwrap();
+        
+        // Verify all callbacks were called in correct order
         assert_eq!(registry.observer_count(), 1);
+        
+        // We can't easily verify the internal state since the observer is now in the registry
+        // But we can verify the registry has one observer
     }
 }

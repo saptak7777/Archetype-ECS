@@ -75,6 +75,48 @@ pub enum EcsError {
 
     /// Hierarchy operation error (cycle, self-attach, etc.)
     HierarchyError(String),
+
+    /// Resource already exists (init_resource failed)
+    ResourceAlreadyExists(std::any::TypeId),
+
+    /// IO error (file operations, etc.)
+    IoError(String),
+
+    /// Spawn error with detailed context
+    SpawnError(SpawnError),
+}
+
+/// Detailed spawn error types
+#[derive(Debug, Clone)]
+pub enum SpawnError {
+    /// Entity capacity exhausted
+    EntityCapacityExhausted {
+        attempted: usize,
+        capacity: usize,
+    },
+    /// Component registration failed
+    ComponentRegistrationFailed(String),
+    /// Archetype creation failed
+    ArchetypeCreationFailed {
+        component_count: usize,
+        reason: String,
+    },
+}
+
+impl fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SpawnError::EntityCapacityExhausted { attempted, capacity } => {
+                write!(f, "Entity capacity exhausted: attempted to spawn {attempted}, max is {capacity}")
+            }
+            SpawnError::ComponentRegistrationFailed(reason) => {
+                write!(f, "Failed to register component: {reason}")
+            }
+            SpawnError::ArchetypeCreationFailed { component_count, reason } => {
+                write!(f, "Failed to create archetype for {component_count} components: {reason}")
+            }
+        }
+    }
 }
 
 impl fmt::Display for EcsError {
@@ -99,11 +141,26 @@ impl fmt::Display for EcsError {
             EcsError::AssetNotFound(msg) => write!(f, "Asset not found: {msg}"),
             EcsError::BatchTooLarge => write!(f, "Batch size too large (max 10,000,000)"),
             EcsError::HierarchyError(msg) => write!(f, "Hierarchy error: {msg}"),
+            EcsError::ResourceAlreadyExists(type_id) => write!(f, "Resource already exists: {type_id:?}"),
+            EcsError::IoError(msg) => write!(f, "IO error: {msg}"),
+            EcsError::SpawnError(spawn_err) => write!(f, "Spawn error: {spawn_err}"),
         }
     }
 }
 
 impl std::error::Error for EcsError {}
+
+impl From<std::io::Error> for EcsError {
+    fn from(err: std::io::Error) -> Self {
+        EcsError::IoError(err.to_string())
+    }
+}
+
+impl From<SpawnError> for EcsError {
+    fn from(err: SpawnError) -> Self {
+        EcsError::SpawnError(err)
+    }
+}
 
 /// Result type alias
 pub type Result<T> = std::result::Result<T, EcsError>;

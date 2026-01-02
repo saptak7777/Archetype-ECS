@@ -103,17 +103,49 @@ impl CachedQueryResult {
         }
     }
 
-    pub fn update(&mut self, archetypes: &[Archetype]) {
-        let count = archetypes.len();
-        if count > self.seen_archetypes {
-            // Check only new archetypes
-            for (id, arch) in archetypes.iter().enumerate().skip(self.seen_archetypes) {
+    pub fn update(&mut self, world: &World) {
+        let count = world.archetype_count();
+        if self.seen_archetypes < count {
+            for (id, arch) in world.archetypes().iter().enumerate().skip(self.seen_archetypes) {
                 if self.signature.matches(arch) {
                     self.matches.push(id);
                 }
             }
             self.seen_archetypes = count;
         }
+    }
+
+    /// SIMD-optimized iteration: returns chunks of components
+    /// 
+    /// # Example
+    /// ```
+    /// # let mut world = archetype_ecs::World::new();
+    /// # for i in 0..100 {
+    /// #     world.spawn((i as f32, 0.0f32));
+    /// # }
+    /// # let mut query = archetype_ecs::CachedQuery::<&mut f32>::new(&world);
+    /// // Process components in SIMD chunks for better performance
+    /// ```
+    pub fn iter_simd_chunks<T: Component + Copy>(&mut self, world: &mut World) -> Vec<&mut [T]> {
+        let mut chunks = Vec::new();
+        
+        // Update state first
+        self.update(world);
+        
+        for &archetype_id in &self.matches {
+            if let Some(archetype) = world.get_archetype_mut(archetype_id) {
+                if let Some(col) = archetype.get_column_mut(std::any::TypeId::of::<T>()) {
+                    let len = col.len();
+                    let ptr = col.get_ptr_mut(0) as *mut T;
+                    unsafe {
+                        let slice = std::slice::from_raw_parts_mut(ptr, len);
+                        chunks.extend(crate::simd::chunks(slice));
+                    }
+                }
+            }
+        }
+        
+        chunks
     }
 }
 
@@ -939,7 +971,7 @@ impl<F: QueryFilter> QueryState<F> {
     /// Update query state with new archetypes (incremental)
     pub fn update(&mut self, world: &World) {
         #[cfg(feature = "profiling")]
-        let _span = info_span!("query_state.update").enter();
+        let _span = info_span!("query_state.update").entered();
 
         let count = world.archetype_count();
         if count > self.seen_archetypes {
@@ -955,6 +987,39 @@ impl<F: QueryFilter> QueryState<F> {
             }
             self.seen_archetypes = count;
         }
+    }
+
+    /// SIMD-optimized iteration: returns chunks of components
+    /// 
+    /// # Example
+    /// ```
+    /// # let mut world = archetype_ecs::World::new();
+    /// # for i in 0..100 {
+    /// #     world.spawn((i as f32, 0.0f32));
+    /// # }
+    /// # let mut query = archetype_ecs::CachedQuery::<&mut f32>::new(&world);
+    /// // Process components in SIMD chunks for better performance
+    /// ```
+    pub fn iter_simd_chunks<T: Component + Copy>(&mut self, world: &mut World) -> Vec<&mut [T]> {
+        let mut chunks = Vec::new();
+        
+        // Update state first
+        self.update(world);
+        
+        for &archetype_id in &self.matches {
+            if let Some(archetype) = world.get_archetype_mut(archetype_id) {
+                if let Some(col) = archetype.get_column_mut(std::any::TypeId::of::<T>()) {
+                    let len = col.len();
+                    let ptr = col.get_ptr_mut(0) as *mut T;
+                    unsafe {
+                        let slice = std::slice::from_raw_parts_mut(ptr, len);
+                        chunks.extend(crate::simd::chunks(slice));
+                    }
+                }
+            }
+        }
+        
+        chunks
     }
 }
 
@@ -1526,7 +1591,7 @@ mod tests {
         let initial_count = query.state.match_count();
 
         // Add archetype matching query
-        world.spawn((10i32,));
+        world.spawn_entity((10i32,));
 
         // Iterating should update state
         let count = query.iter(&world).count();
@@ -1543,9 +1608,9 @@ mod tests {
         #[derive(Debug, Clone, Copy)]
         struct B;
 
-        world.spawn((A, B));
-        world.spawn((A,));
-        world.spawn((B,));
+        world.spawn_entity((A, B));
+        world.spawn_entity((A,));
+        world.spawn_entity((B,));
 
         // Query: A with B
         let mut query = CachedQuery::<(&A, With<B>)>::new(&world);
@@ -1561,7 +1626,7 @@ mod tests {
         let mut world = crate::World::new();
         struct Data(#[allow(dead_code)] i32);
 
-        let _e = world.spawn((Data(1),));
+        let _e = world.spawn_entity((Data(1),));
 
         // Frame 1
         world.increment_tick(); // Tick = 2

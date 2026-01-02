@@ -21,8 +21,8 @@ mod tests {
     use crate::{
         CommandBuffer, Executor, Query, QueryState, Schedule, System, SystemAccess, World,
     };
-    use crate::{EcsError, Result};
-    use std::any::TypeId;
+    use crate::{EcsError, Result, Event};
+    use std::any::{TypeId, Any};
 
     #[test]
     fn test_basic_spawn_despawn() -> Result<()> {
@@ -36,7 +36,7 @@ mod tests {
         }
 
         // Spawn entity
-        let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
+        let entity = world.spawn_entity((Position { x: 1.0, y: 2.0 },));
         assert!(world.get_entity_location(entity).is_some());
 
         // Despawn entity
@@ -56,7 +56,7 @@ mod tests {
             y: f32,
         }
 
-        let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
+        let entity = world.spawn_entity((Position { x: 1.0, y: 2.0 },));
 
         // Despawn should succeed
         world.despawn(entity)?;
@@ -79,10 +79,10 @@ mod tests {
         struct C;
 
         // Spawn entities with different component sets
-        world.spawn((A, B));
-        world.spawn((A, C));
-        world.spawn((B, C));
-        world.spawn((A, B, C));
+        world.spawn_entity((A, B));
+        world.spawn_entity((A, C));
+        world.spawn_entity((B, C));
+        world.spawn_entity((A, B, C));
 
         // Should create at least 4 archetypes (+ empty one)
         assert!(world.archetype_count() >= 4);
@@ -95,7 +95,7 @@ mod tests {
         #[allow(dead_code)]
         struct Comp;
 
-        let entity = world.spawn((Comp,));
+        let entity = world.spawn_entity((Comp,));
         let location = world.get_entity_location(entity).unwrap();
 
         assert_eq!(location.archetype_id, 1); // First non-empty archetype
@@ -108,7 +108,7 @@ mod tests {
 
         struct Comp;
 
-        let entity = world.spawn((Comp,));
+        let entity = world.spawn_entity((Comp,));
         assert!(world.entity_exists(entity));
 
         world.despawn(entity)?;
@@ -140,7 +140,7 @@ mod tests {
         struct Health(u32);
 
         // Spawn with 3 components
-        let e1 = world.spawn((
+        let e1 = world.spawn_entity((
             Position { x: 0.0, y: 0.0 },
             Velocity { x: 1.0, y: 1.0 },
             Health(100),
@@ -149,7 +149,7 @@ mod tests {
         assert!(world.entity_exists(e1));
 
         // Spawn with 2 components
-        let e2 = world.spawn((Position { x: 5.0, y: 5.0 }, Health(50)));
+        let e2 = world.spawn_entity((Position { x: 5.0, y: 5.0 }, Health(50)));
 
         assert!(world.entity_exists(e2));
         assert_eq!(world.archetype_count(), 3); // empty + 3comp + 2comp
@@ -163,7 +163,7 @@ mod tests {
 
         assert_eq!(world.entity_count(), 0);
 
-        let entities: Vec<_> = (0..10).map(|_| world.spawn((Comp,))).collect();
+        let entities: Vec<_> = (0..10).map(|_| world.spawn_entity((Comp,))).collect();
 
         assert_eq!(world.entity_count(), 10);
 
@@ -181,7 +181,7 @@ mod tests {
 
         struct Comp;
 
-        let e1 = world.spawn((Comp,));
+        let e1 = world.spawn_entity((Comp,));
         assert_eq!(world.recycled_entity_count(), 0);
 
         world.despawn(e1)?;
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(world.recycled_entity_count(), 1);
 
         // Spawn again should reuse the ID
-        let e2 = world.spawn((Comp,));
+        let e2 = world.spawn_entity((Comp,));
         assert_eq!(world.recycled_entity_count(), 0);
         // Slotmap keys are opaque; ensure entity now exists again
         assert!(world.entity_exists(e2));
@@ -203,7 +203,7 @@ mod tests {
         struct Comp;
 
         for _ in 0..100 {
-            let _ = world.spawn((Comp,));
+            let _ = world.spawn_entity((Comp,));
         }
 
         assert_eq!(world.entity_count(), 100);
@@ -221,7 +221,7 @@ mod tests {
         struct Comp;
 
         for _ in 0..1000 {
-            let _ = world.spawn((Comp,));
+            let _ = world.spawn_entity((Comp,));
         }
 
         let stats = world.memory_stats();
@@ -246,7 +246,7 @@ mod tests {
 
         // Spawn some entities
         for i in 0..10 {
-            let _ = world.spawn((Position { x: i as f32 }, Velocity { x: 1.0 }));
+            let _ = world.spawn_entity((Position { x: i as f32 }, Velocity { x: 1.0 }));
         }
 
         let state = QueryState::<(&Position, &Velocity)>::new(&world);
@@ -260,7 +260,7 @@ mod tests {
         struct Comp;
 
         for _ in 0..10 {
-            let _ = world.spawn((Comp,));
+            let _ = world.spawn_entity((Comp,));
         }
 
         let query = Query::<&Comp>::new(&world);
@@ -283,7 +283,7 @@ mod tests {
         }
 
         for i in 0..10_000 {
-            let _ = world.spawn((Position { x: i as f32 },));
+            let _ = world.spawn_entity((Position { x: i as f32 },));
         }
 
         assert_eq!(world.entity_count(), 10_000);
@@ -304,11 +304,11 @@ mod tests {
         struct C(i32);
 
         for i in 0..100 {
-            let _ = world.spawn((A(i), B(i)));
-            let _ = world.spawn((A(i), C(i)));
-            let _ = world.spawn((B(i), C(i)));
-            let _ = world.spawn((A(i), B(i), C(i)));
-            let _ = world.spawn((A(i),));
+            let _ = world.spawn_entity((A(i), B(i)));
+            let _ = world.spawn_entity((A(i), C(i)));
+            let _ = world.spawn_entity((B(i), C(i)));
+            let _ = world.spawn_entity((A(i), B(i), C(i)));
+            let _ = world.spawn_entity((A(i),));
         }
 
         assert!(world.archetype_count() >= 5);
@@ -324,7 +324,7 @@ mod tests {
             y: f32,
         }
 
-        let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
+        let entity = world.spawn_entity((Position { x: 1.0, y: 2.0 },));
 
         let pos = world
             .get_component::<Position>(entity)
@@ -347,7 +347,7 @@ mod tests {
             x: f32,
         }
 
-        let entity = world.spawn((Position { x: 3.0 }, Velocity { x: 4.0 }));
+        let entity = world.spawn_entity((Position { x: 3.0 }, Velocity { x: 4.0 }));
 
         let (pos, vel) = world
             .get_components::<(&Position, &Velocity)>(entity)
@@ -366,7 +366,7 @@ mod tests {
             x: f32,
         }
 
-        let entity = world.spawn((Position { x: 0.0 },));
+        let entity = world.spawn_entity((Position { x: 0.0 },));
 
         {
             let pos = world
@@ -391,7 +391,7 @@ mod tests {
         #[derive(Debug, PartialEq)]
         struct Velocity(f32);
 
-        let entity = world.spawn((Position(1.0), Velocity(2.0)));
+        let entity = world.spawn_entity((Position(1.0), Velocity(2.0)));
 
         {
             let (pos, vel) = world
@@ -419,7 +419,7 @@ mod tests {
         struct Velocity(f32);
 
         for i in 0..10 {
-            let _ = world.spawn((Position(i as f32), Velocity(1.0)));
+            let _ = world.spawn_entity((Position(i as f32), Velocity(1.0)));
         }
 
         {
@@ -486,15 +486,15 @@ mod tests {
     #[test]
     fn test_executor_runs_systems_in_order() {
         let mut world = World::new();
-        let entity = world.spawn((LogComponent::default(),));
+        let entity = world.spawn_entity((LogComponent::default(),));
 
-        let schedule = Schedule::new()
+        let mut schedule = Schedule::new()
             .with_system(Box::new(LoggingSystem { name: "first" }))
             .with_system(Box::new(LoggingSystem { name: "second" }))
             .build()
             .expect("build schedule");
 
-        let mut executor = Executor::new(schedule);
+        let mut executor = Executor::new(&mut schedule);
         executor
             .execute_frame(&mut world)
             .expect("executor should run");
@@ -504,7 +504,7 @@ mod tests {
             .expect("log component exists");
         assert_eq!(log.entries, vec!["first", "second"]);
 
-        let profile = executor.profile().expect("profiling data available");
+        let profile = executor.last_profile.as_ref().expect("profiling data available");
         assert_eq!(profile.system_timings.len(), 2);
         assert_eq!(profile.system_timings[0].name, "first");
     }
@@ -512,16 +512,16 @@ mod tests {
     #[test]
     fn test_executor_propagates_errors_and_stops() {
         let mut world = World::new();
-        let entity = world.spawn((LogComponent::default(),));
+        let entity = world.spawn_entity((LogComponent::default(),));
 
-        let schedule = Schedule::new()
+        let mut schedule = Schedule::new()
             .with_system(Box::new(LoggingSystem { name: "first" }))
             .with_system(Box::new(FailingSystem))
             .with_system(Box::new(LoggingSystem { name: "second" }))
             .build()
             .expect("build schedule");
 
-        let mut executor = Executor::new(schedule);
+        let mut executor = Executor::new(&mut schedule);
         let result = executor.execute_frame(&mut world);
         assert!(result.is_err(), "executor should propagate system error");
 
@@ -529,5 +529,173 @@ mod tests {
             .get_component::<LogComponent>(entity)
             .expect("log component exists");
         assert_eq!(log.entries, vec!["first"]);
+    }
+
+    #[test]
+    fn test_get_or_insert_with() {
+        let mut world = World::new();
+        
+        #[derive(Debug, PartialEq)]
+        struct Time {
+            delta: f32,
+        }
+        
+        // First call inserts
+        let time1 = world.get_or_insert_with(|| Time { delta: 0.016 });
+        assert_eq!(time1.delta, 0.016);
+        
+        // Second call returns existing (use a new scope to end the first borrow)
+        {
+            let time2 = world.get_or_insert_with(|| Time { delta: 0.999 });
+            assert_eq!(time2.delta, 0.016); // Not updated
+        }
+    }
+
+    #[test]
+    fn test_init_resource() {
+        let mut world = World::new();
+        
+        #[derive(Debug, PartialEq)]
+        struct Config {
+            value: u32,
+        }
+        
+        // First insert succeeds
+        world.init_resource(Config { value: 42 }).unwrap();
+        
+        // Second insert fails
+        let result = world.init_resource(Config { value: 99 });
+        assert!(matches!(result, Err(EcsError::ResourceAlreadyExists(_))));
+    }
+
+    #[test]
+    fn test_spawn_batch_updates_component_tracker() {
+        let mut world = World::new();
+        
+        // Use simple tuple components directly
+        // Batch spawn entities
+        let entities = world.spawn_batch(vec![
+            ((0.0f32, 0.0f32, 0.0f32), (1.0f32, 0.0f32, 0.0f32)),
+            ((1.0f32, 0.0f32, 0.0f32), (0.0f32, 1.0f32, 0.0f32)),
+        ]).unwrap();
+        
+        // Verify component tracker has entries
+        for entity in entities {
+            let tracked = world.component_tracker.get(&entity);
+            assert!(tracked.is_some(), "Entity should be in component tracker");
+            
+            // Debug: print what we actually track
+            let tracked_set = tracked.unwrap();
+            println!("Entity {:?} tracks {} components: {:?}", entity, tracked_set.len(), tracked_set);
+            
+            // Both tuple types are the same, so we only track 1 component type
+            assert_eq!(tracked_set.len(), 1, "Should track 1 component type (both tuples are same type)");
+        }
+    }
+
+    #[test]
+    fn test_add_stage() {
+        let mut schedule = Schedule::new();
+        schedule.add_stage("Update").unwrap();
+        assert_eq!(schedule.stages.len(), 1);
+        assert_eq!(schedule.stages[0].name, "Update");
+    }
+
+    #[test]
+    fn test_stage_dependencies() {
+        let mut schedule = Schedule::new();
+        schedule.add_stage("Extract").unwrap();
+        schedule.add_stage("Prepare").unwrap();
+        schedule.add_stage_dependency("Prepare", "Extract").unwrap();
+        
+        assert_eq!(schedule.stages[1].depends_on, vec!["Extract"]);
+    }
+
+    #[test]
+    fn test_circular_dependency_detection() {
+        let mut schedule = Schedule::new();
+        schedule.add_stage("A").unwrap();
+        schedule.add_stage("B").unwrap();
+        schedule.add_stage_dependency("A", "B").unwrap();
+        schedule.add_stage_dependency("B", "A").unwrap();
+        
+        assert!(schedule.validate_stages().is_err());
+    }
+
+    #[test]
+    fn test_add_system_to_stage() {
+        let mut schedule = Schedule::new();
+        schedule.add_stage("Update").unwrap();
+        
+        struct TestSystem;
+        impl System for TestSystem {
+            fn name(&self) -> &'static str { "test" }
+            fn access(&self) -> SystemAccess { SystemAccess::new() }
+            fn run(&mut self, _world: &mut World) -> Result<()> { Ok(()) }
+        }
+        
+        schedule.add_system_to_stage("Update", Box::new(TestSystem)).unwrap();
+        assert_eq!(schedule.stages[0].systems.len(), 1);
+        assert_eq!(schedule.systems.len(), 1);
+    }
+
+    #[test]
+    fn test_define_event_macro() {
+        crate::define_event! {
+            pub struct TestEvent {
+                value: u32,
+                name: String,
+            }
+        }
+        
+        let event = TestEvent { value: 42, name: "test".to_string() };
+        assert_eq!(event.event_name(), "TestEvent");
+        assert_eq!(event.event_type_id(), std::any::TypeId::of::<TestEvent>());
+    }
+
+    #[test]
+    fn test_define_event_unit_struct() {
+        crate::define_event! {
+            pub struct UnitEvent;
+        }
+        
+        let event = UnitEvent;
+        assert_eq!(event.event_name(), "UnitEvent");
+    }
+
+    #[test]
+    fn test_define_event_with_doc_comment() {
+        crate::define_event! {
+            /// A test event with documentation
+            pub struct DocumentedEvent {
+                data: i32,
+            }
+        }
+        
+        let event = DocumentedEvent { data: 100 };
+        assert_eq!(event.event_name(), "DocumentedEvent");
+    }
+
+    #[test]
+    fn test_simd_chunks() {
+        use crate::QueryState;
+        
+        #[derive(Debug, Copy, Clone)]
+        struct Position {
+            x: f32,
+            y: f32,
+            z: f32,
+        }
+        
+        let mut world = World::new();
+        for _ in 0..100 {
+            world.spawn_entity((Position { x: 0.0, y: 0.0, z: 0.0 },));
+        }
+        
+        let mut query = QueryState::<&mut Position>::new(&world);
+        let chunks = query.iter_simd_chunks::<Position>(&mut world);
+        
+        assert!(!chunks.is_empty());
+        println!("Found {} chunks", chunks.len());
     }
 }

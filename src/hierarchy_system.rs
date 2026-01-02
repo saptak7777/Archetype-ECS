@@ -252,8 +252,8 @@ mod tests {
     #[test]
     fn test_attach_detach() {
         let mut world = World::new();
-        let parent = world.spawn((LocalTransform::identity(),));
-        let child = world.spawn((LocalTransform::identity(),));
+        let parent = world.spawn_entity((LocalTransform::identity(),));
+        let child = world.spawn_entity((LocalTransform::identity(),));
 
         // Attach
         HierarchyBuilder::attach(&mut world, parent, child).unwrap();
@@ -276,11 +276,11 @@ mod tests {
     #[test]
     fn test_transform_propagation() {
         let mut world = World::new();
-        let parent = world.spawn((
+        let parent = world.spawn_entity((
             LocalTransform::with_position(crate::transform::Vec3::new(10.0, 0.0, 0.0)),
             GlobalTransform::identity(),
         ));
-        let child = world.spawn((
+        let child = world.spawn_entity((
             LocalTransform::with_position(crate::transform::Vec3::new(5.0, 0.0, 0.0)),
             GlobalTransform::identity(),
         ));

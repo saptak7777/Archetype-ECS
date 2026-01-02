@@ -18,7 +18,7 @@ fn test_query_cache_basic() {
 
     // Spawn entities
     for i in 0..100 {
-        world.spawn((
+        world.spawn_entity((
             Position {
                 x: i as f32,
                 y: 0.0,
@@ -49,7 +49,7 @@ fn test_query_cache_incremental_invalidation() {
 
     // Spawn initial entities
     for i in 0..50 {
-        world.spawn((Position {
+        world.spawn_entity((Position {
             x: i as f32,
             y: 0.0,
         },));
@@ -61,7 +61,7 @@ fn test_query_cache_incremental_invalidation() {
 
     // Spawn more entities (creates new archetype potentially)
     for i in 50..100 {
-        world.spawn((Position {
+        world.spawn_entity((Position {
             x: i as f32,
             y: 0.0,
         },));
@@ -82,7 +82,7 @@ fn test_query_cache_clear() {
 
     // Spawn entities and query
     for i in 0..50 {
-        world.spawn((Position {
+        world.spawn_entity((Position {
             x: i as f32,
             y: 0.0,
         },));
@@ -104,7 +104,7 @@ fn test_query_cache_performance() {
 
     // Spawn entities
     for i in 0..1000 {
-        world.spawn((
+        world.spawn_entity((
             Position {
                 x: i as f32,
                 y: 0.0,
@@ -142,7 +142,7 @@ fn test_query_cache_stats() {
 
     // Spawn entities
     for i in 0..100 {
-        world.spawn((Position {
+        world.spawn_entity((Position {
             x: i as f32,
             y: 0.0,
         },));

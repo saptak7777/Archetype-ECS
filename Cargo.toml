@@ -1,6 +1,6 @@
 [package]
 name = "archetype_ecs"
-version = "1.1.7"
+version = "1.1.8"
 edition = "2021"
 authors = ["Saptak Santra"]
 description = "Archetype ECS - High-performance Entity Component System with parallel execution"
@@ -11,7 +11,7 @@ documentation = "https://docs.rs/archetype_ecs"
 
 [dependencies]
 ahash = "0.8.12"
-rayon = "1.8"
+rayon = { version = "1.8", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3.3"
@@ -23,7 +23,7 @@ glam = { version = "0.30.9", features = ["serde", "scalar-math"] }
 rustc-hash = "2.1.1"
 slotmap = { version = "1.0", features = ["serde"] }
 smallvec = "1.13"
-tracing = { version = "0.1", optional = true }
+tracing = { version = "0.1.40", optional = true }
 tracing-appender = { version = "0.2.4", optional = true }
 tracing-subscriber = { version = "0.3.20", features = [
     "json",
@@ -36,17 +36,20 @@ criterion = "0.8.1" # Benchmarking
 hecs = "0.10"
 
 [features]
-default = ["parallel"]
-profiling = ["tracing", "tracing-appender", "tracing-subscriber"]
-parallel = []
+default = ["std", "parallel"]
+std = []
+parallel = ["rayon"]
+profiling = ["tracing", "tracing-subscriber", "tracing-appender"]
+miri = []  # Feature flag for Miri-specific code paths
 
 [[bench]]
 name = "ecs_bench"
 harness = false
 
 [[bench]]
-name = "bench_parallel"
+name = "trace_spawn_bench"
 harness = false
+required-features = ["profiling"]
 
 [[bench]]
 name = "bench_observer"
@@ -60,10 +63,74 @@ harness = false
 name = "bench_events"
 harness = false
 
+[[bench]]
+name = "simd_bench"
+harness = false
+
 
 [[example]]
-name = "basic"
-path = "example/basic.rs"
+name = "00_basic"
+path = "examples/00_basic.rs"
+
+[[example]]
+name = "01_basic_queries"
+path = "examples/01_basic_queries.rs"
+
+[[example]]
+name = "02_change_detection"
+path = "examples/02_change_detection.rs"
+
+[[example]]
+name = "03_system_dependencies"
+path = "examples/03_system_dependencies.rs"
+
+[[example]]
+name = "04_event_system"
+path = "examples/04_event_system.rs"
+
+[[example]]
+name = "05_debug_visualization"
+path = "examples/05_debug_visualization.rs"
+
+[[example]]
+name = "06_parallel_systems"
+path = "examples/06_parallel_systems.rs"
+
+[[example]]
+name = "07_enhanced_profiling"
+path = "examples/07_enhanced_profiling.rs"
+
+[[example]]
+name = "08_serialization"
+path = "examples/08_serialization.rs"
+
+[[example]]
+name = "09_hot_reload"
+path = "examples/09_hot_reload.rs"
+
+[[example]]
+name = "12_plugin_system"
+path = "examples/12_plugin_system.rs"
+
+[[example]]
+name = "13_spawn_error_handling"
+path = "examples/13_spawn_error_handling.rs"
+
+[[example]]
+name = "14_profiling_guide"
+path = "examples/14_profiling_guide.rs"
+
+[[example]]
+name = "15_naming_conventions"
+path = "examples/15_naming_conventions.rs"
+
+[[example]]
+name = "10_basic_phase1"
+path = "examples/10_basic_phase1.rs"
+
+[[example]]
+name = "11_parallel_scheduler"
+path = "examples/11_parallel_scheduler.rs"
 
 [profile.release]
 opt-level = 3

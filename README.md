@@ -126,6 +126,32 @@ world.attach(parent, child)?;
 // HierarchyUpdateSystem will automatically propagate transforms
 ```
 
+### Resources
+Resources are typed singletons for global state (e.g., time, config, window handles).
+
+```rust
+// Insert resource
+world.insert_resource(Time { delta: 0.016 });
+
+// Get resource
+let time = world.resource::<Time>().unwrap();
+
+// Lazy initialization (inserts if missing)
+let time = world.get_or_insert_with(|| Time::default());
+
+// Init-only (errors if exists - prevents accidental overwrites)
+world.init_resource(Config::new())?;
+
+// Systems can declare resource dependencies
+impl System for MySystem {
+    fn access(&self) -> SystemAccess {
+        SystemAccess::new()
+            .read::<Velocity>()
+            .resource::<Time>()  // Tracks resource access
+    }
+}
+```
+
 ### Parallel Systems
 The `ParallelExecutor` distributes systems across a thread pool, ensuring thread safety via runtime borrow checking.
 

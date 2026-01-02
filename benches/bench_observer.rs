@@ -1,5 +1,6 @@
 use archetype_ecs::{EntityEvent, Observer, StatisticsObserver, World};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 #[derive(Clone, Copy, Debug)]
 struct Position {
@@ -24,7 +25,7 @@ fn bench_spawn_no_observers(c: &mut Criterion) {
         b.iter(|| {
             let mut world = World::new();
             for _ in 0..100 {
-                black_box(world.spawn((Position { x: 0.0, y: 0.0 },)));
+                black_box(world.spawn_entity((Position { x: 0.0, y: 0.0 },)));
             }
         })
     });

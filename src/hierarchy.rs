@@ -112,8 +112,8 @@ mod tests {
     #[test]
     fn test_children_management() {
         let mut world = World::new();
-        let id1 = world.spawn((crate::transform::LocalTransform::identity(),));
-        let id2 = world.spawn((crate::transform::LocalTransform::identity(),));
+        let id1 = world.spawn_entity((crate::transform::LocalTransform::identity(),));
+        let id2 = world.spawn_entity((crate::transform::LocalTransform::identity(),));
 
         let mut children = Children::new();
         children.add_child(id1);
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn test_children_no_duplicates() {
         let mut world = World::new();
-        let id = world.spawn((crate::transform::LocalTransform::identity(),));
+        let id = world.spawn_entity((crate::transform::LocalTransform::identity(),));
 
         let mut children = Children::new();
         children.add_child(id);

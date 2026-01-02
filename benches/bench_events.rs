@@ -1,6 +1,7 @@
 use archetype_ecs::{Event, EventBus, EventSubscriber, Result};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use std::any::{Any, TypeId};
+use std::hint::black_box;
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]

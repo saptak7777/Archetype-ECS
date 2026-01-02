@@ -261,7 +261,35 @@ impl ParallelExecutor {
         let systems_ptr = self.systems.as_mut_ptr() as usize;
         let world_ptr = world as *mut World as usize;
 
-        // Execute tasks in parallel with priority ordering
+        // SAFETY: Parallel Execution Invariants
+        //
+        // 1. Pointer Arithmetic Safety:
+        //    - `systems_ptr` and `world_ptr` are captured BEFORE Rayon spawns threads
+        //    - `self.systems` vec is NOT modified during parallel execution
+        //    - Each thread gets a unique `sys_idx`, no aliasing of system references
+        //
+        // 2. Borrow Checker Satisfaction:
+        //    - World is mutably borrowed for 'w (entire parallel section)
+        //    - `&mut World` is reconstructed from raw pointer within each thread
+        //    - No thread accesses the same system as another (unique indices)
+        //
+        // 3. No Data Races:
+        //    - SystemAccess::conflicts_with() guarantees disjoint component/resource access
+        //    - Read-only systems can run in parallel with each other
+        //    - Write systems are scheduled in separate stages by dependency graph
+        //
+        // 4. Lifetime Validity:
+        //    - 'w lifetime outlives the entire parallel execution
+        //    - Systems vec remains valid (no reallocation during execution)
+        //    - World reference remains valid (exclusive borrow held)
+        //
+        // 5. Thread Safety:
+        //    - Only Send + Sync types are used in parallel closure
+        //    - All captured data is either Copy (indices) or raw pointers
+        //    - Results are collected after parallel execution completes
+        //
+        // This follows the same pattern as Rayon's internal parallel iterators
+        // and is safe because the dependency graph ensures no conflicting access.
         let results: Vec<(usize, Duration, Result<()>)> = tasks
             .par_iter()
             .map(|task| {

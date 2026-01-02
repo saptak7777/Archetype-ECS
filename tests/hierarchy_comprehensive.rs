@@ -7,13 +7,13 @@ fn test_hierarchy_single_parent_child() {
     let mut world = World::new();
 
     // Create parent at (10, 0, 0)
-    let parent = world.spawn((
+    let parent = world.spawn_entity((
         LocalTransform::with_position(Vec3::new(10.0, 0.0, 0.0)),
         GlobalTransform::identity(),
     ));
 
     // Create child at local offset (5, 0, 0)
-    let child = world.spawn((
+    let child = world.spawn_entity((
         LocalTransform::with_position(Vec3::new(5.0, 0.0, 0.0)),
         GlobalTransform::identity(),
         Parent::new(parent),
@@ -40,7 +40,7 @@ fn test_hierarchy_multiple_children() {
     let mut world = World::new();
 
     // Create parent
-    let parent = world.spawn((
+    let parent = world.spawn_entity((
         LocalTransform::with_position(Vec3::new(10.0, 0.0, 0.0)),
         GlobalTransform::identity(),
     ));
@@ -50,7 +50,7 @@ fn test_hierarchy_multiple_children() {
     let mut child_ids = Vec::new();
 
     for i in 0..3 {
-        let child = world.spawn((
+        let child = world.spawn_entity((
             LocalTransform::with_position(Vec3::new(i as f32, 0.0, 0.0)),
             GlobalTransform::identity(),
             Parent::new(parent),
@@ -85,11 +85,11 @@ fn test_hierarchy_deep_nesting() {
 
         let entity = if i == 0 {
             // Root
-            world.spawn((local, global))
+            world.spawn_entity((local, global))
         } else {
             // Child of previous
             let parent_id = entities[i - 1];
-            world.spawn((local, global, Parent::new(parent_id)))
+            world.spawn_entity((local, global, Parent::new(parent_id)))
         };
 
         entities.push(entity);
@@ -123,18 +123,18 @@ fn test_hierarchy_reparenting() {
     let mut world = World::new();
 
     // Create two parents
-    let parent_a = world.spawn((
+    let parent_a = world.spawn_entity((
         LocalTransform::with_position(Vec3::new(10.0, 0.0, 0.0)),
         GlobalTransform::identity(),
     ));
 
-    let parent_b = world.spawn((
+    let parent_b = world.spawn_entity((
         LocalTransform::with_position(Vec3::new(20.0, 0.0, 0.0)),
         GlobalTransform::identity(),
     ));
 
     // Create child initially under parent_a
-    let child = world.spawn((
+    let child = world.spawn_entity((
         LocalTransform::with_position(Vec3::new(5.0, 0.0, 0.0)),
         GlobalTransform::identity(),
         Parent::new(parent_a),
@@ -178,11 +178,11 @@ fn test_hierarchy_performance_1000_entities() {
     let mut world = World::new();
 
     // Create wide hierarchy: 1 root, 999 children
-    let root = world.spawn((LocalTransform::identity(), GlobalTransform::identity()));
+    let root = world.spawn_entity((LocalTransform::identity(), GlobalTransform::identity()));
 
     let mut children_component = Children::new();
     for i in 0..999 {
-        let child = world.spawn((
+        let child = world.spawn_entity((
             LocalTransform::with_position(Vec3::new(i as f32, 0.0, 0.0)),
             GlobalTransform::identity(),
             Parent::new(root),
@@ -201,8 +201,7 @@ fn test_hierarchy_performance_1000_entities() {
     // Should complete in <10ms
     assert!(
         duration.as_millis() < 10,
-        "Hierarchy update too slow: {:?}",
-        duration
+        "Hierarchy update too slow: {duration:?}"
     );
 }
 
@@ -211,7 +210,7 @@ fn test_hierarchy_no_parent() {
     let mut world = World::new();
 
     // Create entity with LocalTransform but no Parent
-    let entity = world.spawn((
+    let entity = world.spawn_entity((
         LocalTransform::with_position(Vec3::new(5.0, 0.0, 0.0)),
         GlobalTransform::identity(),
     ));

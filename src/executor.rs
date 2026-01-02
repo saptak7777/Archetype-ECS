@@ -12,6 +12,9 @@ use crate::World;
 use rustc_hash::FxHashMap;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "profiling")]
+use tracing::info_span;
+
 /// System execution profiler
 #[derive(Debug, Clone)]
 pub struct SystemStats {
@@ -87,16 +90,40 @@ pub struct ExecutionProfile {
     pub system_timings: Vec<SystemTiming>,
 }
 
-/// Frame executor
-pub struct Executor {
-    pub schedule: Schedule,
-    pub profiler: SystemProfiler,
-    last_profile: Option<ExecutionProfile>,
+/// Enhanced profiling statistics
+#[derive(Debug, Clone)]
+pub struct ProfilingStats {
+    pub total_frame_time: Duration,
+    pub system_timings: Vec<SystemTiming>,
+    pub time_per_entity: f32,
+    pub memory_usage: usize,
+    pub entity_count: usize,
+    pub systems_per_second: f32,
 }
 
-impl Executor {
-    /// Create new executor
-    pub fn new(schedule: Schedule) -> Self {
+impl Default for ProfilingStats {
+    fn default() -> Self {
+        Self {
+            total_frame_time: Duration::ZERO,
+            system_timings: Vec::new(),
+            time_per_entity: 0.0,
+            memory_usage: 0,
+            entity_count: 0,
+            systems_per_second: 0.0,
+        }
+    }
+}
+
+/// Frame executor
+pub struct Executor<'s> {
+    schedule: &'s mut Schedule,
+    pub profiler: SystemProfiler,
+    pub last_profile: Option<ExecutionProfile>,
+}
+
+impl<'s> Executor<'s> {
+    /// Create new executor with schedule reference
+    pub fn new(schedule: &'s mut Schedule) -> Self {
         Self {
             schedule,
             profiler: SystemProfiler::new(),
@@ -107,46 +134,127 @@ impl Executor {
     /// Execute one frame
     pub fn execute_frame(&mut self, world: &mut World) -> Result<()> {
         world.increment_tick();
+        
         self.schedule.ensure_built()?;
-        // Collect stage plan to avoid borrow checker issues
-        let stage_plan: Vec<Vec<SystemId>> = self
-            .schedule
-            .stage_plan()
-            .iter()
-            .map(|stage| stage.to_vec())
-            .collect();
-        let frame_start = Instant::now();
-        let mut system_timings = Vec::with_capacity(self.schedule.systems.len());
+        
+        // Check if we have named stages with dependencies (not default stages)
+        let has_named_stages = self.schedule.stages.iter().any(|s| s.name != "default");
+        
+        if has_named_stages {
+            // Validate stage dependencies if using named stages
+            self.schedule.validate_stages()?;
+            
+            // Get topologically sorted stages
+            let sorted_stages = self.topological_sort_stages()?;
+            
+            let frame_start = Instant::now();
+            let mut system_timings = Vec::with_capacity(self.schedule.systems.len());
 
-        for stage in stage_plan {
-            for system_id in stage {
-                let system = self
-                    .schedule
-                    .system_mut_by_id(system_id)
-                    .ok_or(EcsError::SystemNotFound)?;
-                let system_name = system.name();
+            for stage in sorted_stages {
+                for system_id in stage.systems {
+                    let system = self
+                        .schedule
+                        .system_mut_by_id(system_id)
+                        .ok_or(EcsError::SystemNotFound)?;
+                    let system_name = system.name();
 
-                let start = Instant::now();
-                system.run(world)?;
-                let duration = start.elapsed();
+                    let start = Instant::now();
+                    system.run(world)?;
+                    let duration = start.elapsed();
 
-                self.profiler.record_execution(system_id, duration);
-                system_timings.push(SystemTiming {
-                    name: system_name.to_string(),
-                    duration,
-                });
+                    self.profiler.record_execution(system_id, duration);
+                    system_timings.push(SystemTiming {
+                        name: system_name.to_string(),
+                        duration,
+                    });
+                }
             }
 
-            self.barrier(world)?;
+            let frame_duration = frame_start.elapsed();
+            self.last_profile = Some(ExecutionProfile {
+                total_frame_time: frame_duration,
+                system_timings,
+            });
+        } else {
+            // Use the stage plan for backward compatibility
+            let stage_plan: Vec<Vec<SystemId>> = self
+                .schedule
+                .stage_plan()
+                .iter()
+                .map(|stage| stage.to_vec())
+                .collect();
+            let frame_start = Instant::now();
+            let mut system_timings = Vec::with_capacity(self.schedule.systems.len());
+
+            for stage in stage_plan {
+                for system_id in stage {
+                    let system = self
+                        .schedule
+                        .system_mut_by_id(system_id)
+                        .ok_or(EcsError::SystemNotFound)?;
+                    let system_name = system.name();
+
+                    let start = Instant::now();
+                    system.run(world)?;
+                    let duration = start.elapsed();
+
+                    self.profiler.record_execution(system_id, duration);
+                    system_timings.push(SystemTiming {
+                        name: system_name.to_string(),
+                        duration,
+                    });
+                }
+            }
+
+            let frame_duration = frame_start.elapsed();
+            self.last_profile = Some(ExecutionProfile {
+                total_frame_time: frame_duration,
+                system_timings,
+            });
         }
 
-        let total_frame_time = frame_start.elapsed();
-        self.last_profile = Some(ExecutionProfile {
-            total_frame_time,
-            system_timings,
-        });
-
         Ok(())
+    }
+
+    /// Topologically sort stages based on dependencies
+    fn topological_sort_stages(&self) -> Result<Vec<crate::schedule::Stage>> {
+        let mut sorted = Vec::new();
+        let mut temp = std::collections::HashSet::new();
+        let mut visited = std::collections::HashSet::new();
+        
+        fn visit(
+            stage: &crate::schedule::Stage,
+            all_stages: &[crate::schedule::Stage],
+            sorted: &mut Vec<crate::schedule::Stage>,
+            temp: &mut std::collections::HashSet<String>,
+            visited: &mut std::collections::HashSet<String>,
+        ) -> Result<()> {
+            if temp.contains(&stage.name) {
+                return Err(EcsError::ScheduleError(format!("Circular dependency in stage '{}'", stage.name)));
+            }
+            if visited.contains(&stage.name) {
+                return Ok(());
+            }
+            
+            temp.insert(stage.name.clone());
+            
+            for dep_name in &stage.depends_on {
+                if let Some(dep_stage) = all_stages.iter().find(|s| s.name.as_str() == dep_name) {
+                    visit(dep_stage, all_stages, sorted, temp, visited)?;
+                }
+            }
+            
+            temp.remove(&stage.name);
+            visited.insert(stage.name.clone());
+            sorted.push(stage.clone());
+            Ok(())
+        }
+        
+        for stage in &self.schedule.stages {
+            visit(stage, &self.schedule.stages, &mut sorted, &mut temp, &mut visited)?;
+        }
+        
+        Ok(sorted)
     }
 
     /// Execute systems in parallel where possible
@@ -339,6 +447,97 @@ impl Executor {
         } else {
             println!("No profiling data collected yet.");
         }
+    }
+
+    /// Get detailed profiling stats
+    pub fn profiling_stats(&self, world: &World) -> ProfilingStats {
+        let mut stats = ProfilingStats::default();
+        
+        if let Some(profile) = &self.last_profile {
+            stats.total_frame_time = profile.total_frame_time;
+            stats.system_timings = profile.system_timings.clone();
+            
+            // Calculate per-entity timing
+            stats.entity_count = world.entity_count() as usize;
+            if stats.entity_count > 0 {
+                stats.time_per_entity = stats.total_frame_time.as_secs_f32() / stats.entity_count as f32;
+            }
+            
+            // Calculate systems per second
+            if !stats.total_frame_time.is_zero() {
+                stats.systems_per_second = stats.system_timings.len() as f32 / stats.total_frame_time.as_secs_f32();
+            }
+            
+            // Get memory usage
+            stats.memory_usage = world.memory_stats().total_memory;
+        }
+        
+        stats
+    }
+    
+    /// Export profiling data to CSV
+    pub fn export_profiling_csv(&self, world: &World, path: &str) -> Result<()> {
+        use std::fs::File;
+        use std::io::Write;
+        
+        if let Some(profile) = &self.last_profile {
+            let mut file = File::create(path)?;
+            
+            // Write CSV header
+            writeln!(file, "system_name,duration_ms,duration_us,percentage")?;
+            
+            // Write system timings
+            for timing in &profile.system_timings {
+                let duration_ms = timing.duration.as_millis();
+                let duration_us = timing.duration.as_micros();
+                let percentage = (timing.duration.as_secs_f32() / profile.total_frame_time.as_secs_f32()) * 100.0;
+                
+                writeln!(file, "{},{},{},{:.2}", timing.name, duration_ms, duration_us, percentage)?;
+            }
+            
+            // Write summary
+            writeln!(file)?;
+            writeln!(file, "Total Frame Time,{} ms", profile.total_frame_time.as_millis())?;
+            writeln!(file, "Entity Count,{}", world.entity_count())?;
+            writeln!(file, "Time Per Entity,{:.6} ms", 
+                (profile.total_frame_time.as_secs_f32() / world.entity_count() as f32) * 1000.0)?;
+            writeln!(file, "Memory Usage,{} bytes", world.memory_stats().total_memory)?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Print enhanced profiling summary
+    pub fn print_profiling_summary(&self, world: &World) {
+        let stats = self.profiling_stats(world);
+        
+        println!("=== Enhanced Profiling Summary ===");
+        println!("Frame Time: {:.3?} ({:.1} FPS)", 
+            stats.total_frame_time, 
+            1.0 / stats.total_frame_time.as_secs_f32());
+        println!("Systems: {} ({:.1} systems/sec)", 
+            stats.system_timings.len(), 
+            stats.systems_per_second);
+        println!("Entities: {}", stats.entity_count);
+        println!("Time/Entity: {:.6} ms", stats.time_per_entity * 1000.0);
+        println!("Memory: {} bytes ({:.1} MB)", 
+            stats.memory_usage, 
+            stats.memory_usage as f64 / 1_048_576.0);
+        
+        // Show slowest systems
+        if !stats.system_timings.is_empty() {
+            println!("\nSlowest Systems:");
+            let mut sorted_timings = stats.system_timings.clone();
+            sorted_timings.sort_by(|a, b| b.duration.cmp(&a.duration));
+            
+            for (i, timing) in sorted_timings.iter().take(5).enumerate() {
+                let percentage = (timing.duration.as_secs_f32() / stats.total_frame_time.as_secs_f32()) * 100.0;
+                println!("  {}. {} - {:.3?} ({:.1}%)", 
+                    i + 1, timing.name, timing.duration, percentage);
+            }
+        }
+        
+        println!("===================================");
     }
 }
 

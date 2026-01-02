@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use archetype_ecs::World;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 #[derive(Debug, Clone)]
 struct Position(f32, f32, f32);
@@ -20,7 +21,7 @@ fn spawn_benchmark(c: &mut Criterion) {
         let mut world = World::new();
         b.iter(|| {
             for _ in 0..1000 {
-                black_box(world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0))));
+                black_box(world.spawn_entity((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0))));
             }
         });
     });
@@ -30,7 +31,7 @@ fn spawn_benchmark(c: &mut Criterion) {
         let mut world = World::new();
         b.iter(|| {
             for _ in 0..1000 {
-                black_box(world.spawn((
+                black_box(world.spawn_entity((
                     Position(1.0, 2.0, 3.0),
                     Velocity(1.0, 0.0, 0.0),
                     Health(100),
@@ -45,9 +46,9 @@ fn spawn_benchmark(c: &mut Criterion) {
         b.iter(|| {
             for i in 0..1000 {
                 if i % 2 == 0 {
-                    black_box(world.spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0))));
+                    black_box(world.spawn_entity((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0))));
                 } else {
-                    black_box(world.spawn((
+                    black_box(world.spawn_entity((
                         Position(1.0, 2.0, 3.0),
                         Velocity(1.0, 0.0, 0.0),
                         Health(100),

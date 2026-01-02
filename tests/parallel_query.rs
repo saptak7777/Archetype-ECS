@@ -18,7 +18,7 @@ fn test_parallel_query_basic() {
 
     // Spawn many entities across multiple archetypes to ensure parallel work
     for i in 0..5000 {
-        world.spawn((
+        world.spawn_entity((
             Position {
                 x: i as f32,
                 y: 0.0,
@@ -28,7 +28,7 @@ fn test_parallel_query_basic() {
     }
 
     for i in 0..5000 {
-        world.spawn((
+        world.spawn_entity((
             Position {
                 x: i as f32,
                 y: 100.0,
@@ -66,8 +66,8 @@ fn test_parallel_query_complex_filter() {
 
     let mut world = World::new();
 
-    let e1 = world.spawn((Position { x: 0.0, y: 0.0 },));
-    let _e2 = world.spawn((Position { x: 10.0, y: 10.0 },));
+    let e1 = world.spawn_entity((Position { x: 0.0, y: 0.0 },));
+    let _e2 = world.spawn_entity((Position { x: 10.0, y: 10.0 },));
 
     world.increment_tick(); // Tick 2
 

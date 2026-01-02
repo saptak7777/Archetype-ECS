@@ -23,7 +23,7 @@ mod remove_component_tests {
     fn test_remove_component_middle_preserves_data() {
         let mut world = World::new();
 
-        let entity = world.spawn((
+        let entity = world.spawn_entity((
             Position { x: 1.0, y: 2.0 },
             Velocity { x: 3.0, y: 4.0 },
             Health(100),
@@ -67,9 +67,9 @@ mod remove_component_tests {
     fn test_remove_component_multiple_entities() {
         let mut world = World::new();
 
-        let e1 = world.spawn((Position { x: 1.0, y: 1.0 }, Velocity { x: 1.0, y: 1.0 }));
-        let e2 = world.spawn((Position { x: 2.0, y: 2.0 }, Velocity { x: 2.0, y: 2.0 }));
-        let e3 = world.spawn((Position { x: 3.0, y: 3.0 }, Velocity { x: 3.0, y: 3.0 }));
+        let e1 = world.spawn_entity((Position { x: 1.0, y: 1.0 }, Velocity { x: 1.0, y: 1.0 }));
+        let e2 = world.spawn_entity((Position { x: 2.0, y: 2.0 }, Velocity { x: 2.0, y: 2.0 }));
+        let e3 = world.spawn_entity((Position { x: 3.0, y: 3.0 }, Velocity { x: 3.0, y: 3.0 }));
 
         // Remove from all
         world.remove_component::<Velocity>(e1).unwrap();
@@ -87,7 +87,7 @@ mod remove_component_tests {
     fn test_remove_component_sequential_stress() {
         let mut world = World::new();
 
-        let entity = world.spawn((
+        let entity = world.spawn_entity((
             Position { x: 1.0, y: 1.0 },
             Velocity { x: 2.0, y: 2.0 },
             Health(100),
@@ -110,7 +110,7 @@ mod remove_component_tests {
     fn test_remove_nonexistent_component() {
         let mut world = World::new();
 
-        let entity = world.spawn((Position { x: 1.0, y: 1.0 },));
+        let entity = world.spawn_entity((Position { x: 1.0, y: 1.0 },));
 
         // Attempting to remove non-existent component should error
         let result = world.remove_component::<Health>(entity);

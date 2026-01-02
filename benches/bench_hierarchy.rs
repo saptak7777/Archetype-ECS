@@ -1,5 +1,6 @@
 use archetype_ecs::{Children, GlobalTransform, LocalTransform, Quat, Vec3, World};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 fn bench_flat_entities(c: &mut Criterion) {
     c.bench_function("flat_1000_entities", |b| {

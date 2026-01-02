@@ -58,13 +58,13 @@ pub struct World {
     observers: ObserverRegistry,
 
     /// Component tracker for change detection
-    component_tracker: AHashMap<EntityId, std::collections::HashSet<TypeId>>,
+    pub component_tracker: AHashMap<EntityId, std::collections::HashSet<TypeId>>,
 
     /// Global event bus for pub/sub communication (Phase 6)
     global_event_bus: crate::event_bus::EventBus,
 
     /// Current world tick
-    tick: u32,
+    pub tick: u32,
 
     /// Deferred removal queue for safe entity deletion during iteration
     removal_queue: Vec<EntityId>,
@@ -115,11 +115,12 @@ impl World {
     }
 
     pub fn increment_tick(&mut self) {
-        // Panic on overflow - tick wraparound would break change detection
-        if self.tick == u32::MAX {
-            panic!("World tick overflow at {}", self.tick);
+        // Saturating add: prefer capped growth over panic
+        self.tick = self.tick.saturating_add(1);
+        // Reserve 0 for "never changed" state
+        if self.tick == 0 {
+            self.tick = 1;
         }
-        self.tick = self.tick.wrapping_add(1);
     }
 
     /// Spawn entity with components
@@ -127,9 +128,42 @@ impl World {
     ///
     /// # Panics
     /// Panics if the Entity ID generator overflows (which is practically impossible).
+    #[deprecated(since = "1.2.0", note = "Use spawn_entity() instead for better clarity")]
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> EntityId {
-        // Ensure capacity before insertion (panic on overflow is acceptable)
-        self.ensure_entity_capacity();
+        self.spawn_entity(bundle)
+    }
+
+    /// Spawn entity with components
+    /// Spawn a new entity with the given bundle of components.
+    ///
+    /// # Panics
+    /// Panics if the Entity ID generator overflows (which is practically impossible).
+    pub fn spawn_entity<B: Bundle>(&mut self, bundle: B) -> EntityId {
+        self.try_spawn_entity(bundle).unwrap()
+    }
+
+    /// Try to spawn entity with components, returning detailed error information
+    /// 
+    /// # Errors
+    /// Returns an error if:
+    /// - Entity capacity is exhausted
+    /// - Component registration fails  
+    /// - Archetype creation fails
+    #[deprecated(since = "1.2.0", note = "Use try_spawn_entity() instead for better clarity")]
+    pub fn try_spawn<B: Bundle>(&mut self, bundle: B) -> crate::error::Result<EntityId> {
+        self.try_spawn_entity(bundle)
+    }
+
+    /// Try to spawn entity with components, returning detailed error information
+    /// 
+    /// # Errors
+    /// Returns an error if:
+    /// - Entity capacity is exhausted
+    /// - Component registration fails  
+    /// - Archetype creation fails
+    pub fn try_spawn_entity<B: Bundle>(&mut self, bundle: B) -> crate::error::Result<EntityId> {
+        // Ensure capacity before insertion
+        self.ensure_entity_capacity()?;
 
         let placeholder = EntityLocation {
             archetype_id: usize::MAX,
@@ -200,7 +234,7 @@ impl World {
         self.component_tracker.insert(id, component_set);
 
         // Return entity ID
-        id
+        Ok(id)
     }
 
     /// Check if an entity is alive
@@ -334,9 +368,28 @@ impl World {
             return Ok(());
         }
 
-        // Calculate new signature
+        // Check cache first (fast path)
+        let old_arch_id = location.archetype_id;
+        let component_type = TypeId::of::<T>();
+        let cache_key = (old_arch_id, component_type, true); // true = adding component
+        
+        if let Some(&new_archetype_id) = self.transitions.get(&cache_key) {
+            // Fast path: archetype already exists in cache
+            self.move_entity(entity, location, new_archetype_id, |archetype, row| {
+                // Initialize new component
+                if let Some(col) = archetype.get_column_mut(TypeId::of::<T>()) {
+                    let ptr = col.get_ptr_mut(row) as *mut T;
+                    unsafe {
+                        std::ptr::write(ptr, component);
+                    }
+                }
+            })?;
+            return Ok(());
+        }
+
+        // Slow path: compute new archetype and cache it
         let mut new_signature = old_archetype.signature().clone();
-        new_signature.push(TypeId::of::<T>());
+        new_signature.push(component_type);
 
         // Capture existing columns to replicate them in new archetype
         // We need to do this before calling get_or_create_archetype as that requires mutable self access,
@@ -355,6 +408,9 @@ impl World {
             archetype.register_component::<T>();
             archetype.mark_columns_initialized();
         });
+
+        // Cache the transition for future use
+        self.transitions.insert(cache_key, new_archetype_id);
 
         // Move entity
         self.move_entity(entity, location, new_archetype_id, |archetype, row| {
@@ -555,7 +611,7 @@ impl World {
         {
             let mut cache = self.query_cache.borrow_mut();
             if let Some(cached) = cache.get_mut(&sig) {
-                cached.update(&self.archetypes);
+                cached.update(self);
                 // Clone to avoid lifetime issues with mutable cache access
                 return cached.matches.to_vec();
             }
@@ -712,6 +768,48 @@ impl World {
             .map(|boxed| *boxed)
     }
 
+    /// Get a mutable reference to a resource, inserting it if it doesn't exist
+    ///
+    /// # Example
+    /// ```ignore
+    /// let time = world.get_or_insert_with(|| Time { delta: 0.016 });
+    /// ```
+    pub fn get_or_insert_with<R: Send + Sync + 'static>(
+        &mut self, 
+        f: impl FnOnce() -> R
+    ) -> &mut R {
+        let type_id = TypeId::of::<R>();
+        
+        if !self.resources.contains_key(&type_id) {
+            self.resources.insert(type_id, Box::new(f()));
+        }
+        
+        self.resources
+            .get_mut(&type_id)
+            .and_then(|r| r.downcast_mut())
+            .unwrap()
+    }
+
+    /// Insert a resource, returning error if it already exists
+    ///
+    /// Use this for setup-time initialization to prevent accidental overwrites.
+    ///
+    /// # Errors
+    /// Returns `EcsError::ResourceAlreadyExists` if resource already exists
+    pub fn init_resource<R: Send + Sync + 'static>(
+        &mut self, 
+        resource: R
+    ) -> Result<()> {
+        let type_id = TypeId::of::<R>();
+        
+        if self.resources.contains_key(&type_id) {
+            return Err(EcsError::ResourceAlreadyExists(type_id));
+        }
+        
+        self.resources.insert(type_id, Box::new(resource));
+        Ok(())
+    }
+
     /// Get or create archetype with caching for common signatures
     fn get_or_create_archetype(&mut self, signature: &[TypeId]) -> usize {
         // PARANOID: Prevent archetype explosion DoS attack
@@ -840,6 +938,13 @@ impl World {
                 bundle.write_components(&ptrs[..col_count]);
             }
 
+            // Track components for change detection
+            let mut component_set = std::collections::HashSet::new();
+            for &tid in type_ids.iter() {
+                component_set.insert(tid);
+            }
+            self.component_tracker.insert(entity, component_set);
+
             entity_ids.push(entity);
         }
 
@@ -847,12 +952,15 @@ impl World {
     }
 
     /// Ensure we have enough capacity for new entities with an aggressive growth strategy
-    fn ensure_entity_capacity(&mut self) {
+    fn ensure_entity_capacity(&mut self) -> crate::error::Result<()> {
         let len = self.entity_locations.len();
 
-        // Panic on overflow - indicates programming error, not user error
-        if len >= usize::MAX - 1024 {
-            panic!("Entity ID exhaustion: {len:#x} entities allocated");
+        // Check for overflow - indicates programming error, not user error
+        if len == usize::MAX {
+            return Err(crate::error::EcsError::SpawnError(crate::error::SpawnError::EntityCapacityExhausted {
+                attempted: 1,
+                capacity: usize::MAX,
+            }));
         }
 
         let cap = self.entity_locations.capacity();
@@ -862,11 +970,12 @@ impl World {
             let growth = (cap / 2).max(64);
             self.entity_locations.reserve(growth);
         }
+        Ok(())
     }
 
     /// Spawn entity with components and trigger event
     pub fn spawn_with_event<B: Bundle>(&mut self, bundle: B) -> EntityId {
-        let entity = self.spawn(bundle);
+        let entity = self.spawn_entity(bundle);
         self.event_queue.push(EntityEvent::Spawned(entity));
 
         // Track components for this entity
@@ -1041,7 +1150,7 @@ impl World {
 
         if let Some(cached) = cache.get_mut(signature) {
             if cached.seen_archetypes < current_archetype_count {
-                cached.update(&self.archetypes);
+                cached.update(self);
             }
             cached.matches.to_vec()
         } else {
@@ -1059,8 +1168,102 @@ impl World {
         self.query_cache.borrow_mut().clear();
     }
 
-    /// Get query cache statistics for diagnostics
-    /// Get query cache statistics for diagnostics
+    /// Print entity state for debugging
+    /// 
+    /// This method displays all components on an entity in a readable format.
+    /// Useful for debugging entity state during development.
+    /// 
+    /// # Example
+    /// ```
+    /// # let mut world = archetype_ecs::World::new();
+    /// # let entity_id = world.spawn((1.0f32, 0.1f32));
+    /// world.debug_print_entity(entity_id);
+    /// // Output shows entity with its components
+    /// ```
+    pub fn debug_print_entity(&self, entity: EntityId) {
+        if let Some(loc) = self.entity_locations.get(entity) {
+            let archetype = &self.archetypes[loc.archetype_id];
+            println!("Entity#? {{");
+            
+            // Print each component type ID
+            for type_id in archetype.signature().iter() {
+                println!("  {type_id:?}: <component data>");
+            }
+            
+            println!("}}");
+        } else {
+            println!("Entity#?: <not found>");
+        }
+    }
+
+    /// Print all entities that have a specific component
+    /// 
+    /// Useful for finding entities with certain components during debugging.
+    /// 
+    /// # Example
+    /// ```
+    /// # let mut world = archetype_ecs::World::new();
+    /// # world.spawn((1.0f32, 0.1f32));
+    /// # world.spawn((2.0f32, 0.2f32));
+    /// world.debug_print_entities_with::<f32>();
+    /// // Output shows all entities with f32 components
+    /// ```
+    pub fn debug_print_entities_with<T: Component>(&self) {
+        let type_id = std::any::TypeId::of::<T>();
+        let mut count = 0;
+        
+        for (_entity, loc) in self.entity_locations.iter() {
+            let archetype = &self.archetypes[loc.archetype_id];
+            if archetype.signature().contains(&type_id) {
+                println!("Entity#? has component {:?}", std::any::type_name::<T>());
+                count += 1;
+            }
+        }
+        
+        if count == 0 {
+            println!("No entities found with component {:?}", std::any::type_name::<T>());
+        } else {
+            println!("Found {} entities with component {:?}", count, std::any::type_name::<T>());
+        }
+    }
+
+    /// Print memory usage statistics for debugging
+    /// 
+    /// This method provides insight into memory usage patterns and can help
+    /// identify memory leaks or inefficient usage.
+    pub fn debug_print_memory_stats(&self) {
+        let stats = self.memory_stats();
+        println!("=== Memory Usage Statistics ===");
+        println!("Entity Index Memory: {} bytes", stats.entity_index_memory);
+        println!("Archetype Memory: {} bytes", stats.archetype_memory);
+        println!("Total Memory: {} bytes", stats.total_memory);
+        println!("Entity Count: {}", self.entity_count());
+        println!("Archetype Count: {}", self.archetype_count());
+        println!("Recycled Entities: {}", self.recycled_entity_count());
+        println!("==============================");
+    }
+
+    /// Print query cache statistics for debugging
+    /// 
+    /// This method shows how the query cache is performing and can help
+    /// identify cache hit/miss patterns.
+    pub fn debug_print_query_cache_stats(&self) {
+        let cache = self.query_cache.borrow();
+        let total_cached_archetypes: usize =
+            cache.values().map(|cached| cached.matches.len()).sum();
+
+        println!("=== Query Cache Statistics ===");
+        println!("Cached Queries: {}", cache.len());
+        println!("Total Cached Archetypes: {total_cached_archetypes}");
+        println!("Total Archetypes: {}", self.archetypes.len());
+        println!("Cache Efficiency: {:.1}%", 
+            (total_cached_archetypes as f64 / self.archetypes.len().max(1) as f64) * 100.0);
+        println!("=============================");
+    }
+
+    /// Get query cache statistics
+    /// 
+    /// Returns statistics about the query cache performance.
     pub fn query_cache_stats(&self) -> QueryCacheStats {
         let cache = self.query_cache.borrow();
         let total_cached_archetypes: usize =
@@ -1108,7 +1311,7 @@ mod tests {
     fn test_spawn_despawn() -> Result<()> {
         let mut world = World::new();
 
-        let entity = world.spawn((42i32,));
+        let entity = world.spawn_entity((42i32,));
         assert!(world.get_entity_location(entity).is_some());
 
         world.despawn(entity).unwrap();
@@ -1125,9 +1328,9 @@ mod tests {
         struct B;
         struct C;
 
-        world.spawn((A, B));
-        world.spawn((A, C));
-        world.spawn((B, C));
+        world.spawn_entity((A, B));
+        world.spawn_entity((A, C));
+        world.spawn_entity((B, C));
 
         // Should create 4 archetypes (+ empty one)
         assert!(world.archetype_count() >= 4);

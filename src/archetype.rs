@@ -497,7 +497,8 @@ impl ComponentColumn {
         // Writing to a ZST is a no-op, but the pointer must be correctly aligned
         // to avoid Undefined Behavior.
         if self.item_size == 0 {
-            return self.align as *mut u8;
+            // SAFETY: ZSTs are never dereferenced, use without_provenance for Miri compliance
+            return std::ptr::without_provenance_mut::<u8>(self.align);
         }
 
         let required_len = (index + 1) * self.item_size;
@@ -524,7 +525,14 @@ impl ComponentColumn {
             self.len = index + 1;
         }
 
-        unsafe { self.ptr.add(index * self.item_size) }
+        // SAFETY: Use checked arithmetic and bounds validation
+        let offset = index.checked_mul(self.item_size)
+            .expect("index * item_size overflow");
+        
+        // Ensure offset is within capacity bounds
+        assert!(offset + self.item_size <= self.cap, "Pointer arithmetic overflow");
+        
+        unsafe { self.ptr.add(offset) }
     }
 
     /// Mark component as changed at given row

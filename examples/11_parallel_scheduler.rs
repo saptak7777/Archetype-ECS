@@ -4,18 +4,21 @@ use archetype_ecs::*;
 
 // Components
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Example component for parallel scheduler
 struct Position {
     x: f32,
     y: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Example component for parallel scheduler
 struct Velocity {
     x: f32,
     y: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Example component for parallel scheduler
 struct Health {
     current: i32,
     max: i32,
@@ -36,7 +39,7 @@ impl System for MovementSystem {
         "movement_system"
     }
 
-    fn run(&mut self, _world: &World) -> Result<()> {
+    fn run(&mut self, _world: &mut World) -> Result<()> {
         println!("Running movement system");
         // In real implementation: query and update entities
         Ok(())
@@ -56,7 +59,7 @@ impl System for HealthSystem {
         "health_system"
     }
 
-    fn run(&mut self, _world: &World) -> Result<()> {
+    fn run(&mut self, _world: &mut World) -> Result<()> {
         println!("Running health system");
         Ok(())
     }
@@ -76,7 +79,7 @@ impl System for RenderSystem {
         "render_system"
     }
 
-    fn run(&mut self, _world: &World) -> Result<()> {
+    fn run(&mut self, _world: &mut World) -> Result<()> {
         println!("Running render system");
         Ok(())
     }
@@ -96,7 +99,7 @@ fn main() -> Result<()> {
             current: 100,
             max: 100,
         },
-    ))?;
+    ));
 
     let entity2 = world.spawn((
         Position { x: 10.0, y: 5.0 },
@@ -105,26 +108,22 @@ fn main() -> Result<()> {
             current: 75,
             max: 100,
         },
-    ))?;
+    ));
 
     println!("Spawned entities: {:?}, {:?}\n", entity1, entity2);
 
     // Create schedule and add systems
-    let schedule = Schedule::new()
+    let mut schedule = Schedule::new()
         .with_system(Box::new(MovementSystem))
         .with_system(Box::new(HealthSystem))
         .with_system(Box::new(RenderSystem))
         .build()?;
 
     println!("Schedule built successfully!");
-    println!("  Stages: {}", schedule.stage_count());
-    for (i, stage) in schedule.stages.iter().enumerate() {
-        println!("  Stage {}: {} systems", i, stage.systems.len());
-    }
     println!();
 
     // Create executor
-    let mut executor = Executor::new(schedule);
+    let mut executor = Executor::new(&mut schedule);
 
     // Execute frames
     println!("Executing 3 frames:\n");

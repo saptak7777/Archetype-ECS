@@ -106,13 +106,17 @@ impl SystemGraph {
 /// Stage of systems that can run in parallel
 #[derive(Debug, Clone)]
 pub struct Stage {
+    pub name: String,
     pub systems: Vec<SystemId>,
+    pub depends_on: Vec<String>,  // Names of stages this depends on
 }
 
 impl Stage {
-    pub fn new() -> Self {
+    pub fn new(name: &str) -> Self {
         Self {
+            name: name.to_string(),
             systems: Vec::new(),
+            depends_on: Vec::new(),
         }
     }
 
@@ -139,7 +143,7 @@ impl Stage {
 
 impl Default for Stage {
     fn default() -> Self {
-        Self::new()
+        Self::new("default")
     }
 }
 
@@ -185,6 +189,85 @@ impl Schedule {
             graph: None,
             ordering_constraints: Vec::new(),
         }
+    }
+
+    /// Add a new named stage
+    pub fn add_stage(&mut self, name: &str) -> Result<()> {
+        if self.stages.iter().any(|s| s.name == name) {
+            return Err(EcsError::ScheduleError(format!("Stage '{name}' already exists")));
+        }
+        self.stages.push(Stage {
+            name: name.to_string(),
+            systems: Vec::new(),
+            depends_on: Vec::new(),
+        });
+        Ok(())
+    }
+    
+    /// Add dependency from one stage to another
+    pub fn add_stage_dependency(&mut self, stage: &str, depends_on: &str) -> Result<()> {
+        // Check if dependency stage exists first
+        if !self.stages.iter().any(|s| s.name == depends_on) {
+            return Err(EcsError::ScheduleError(format!("Dependency stage '{depends_on}' not found")));
+        }
+        
+        let stage_def = self.stages.iter_mut()
+            .find(|s| s.name == stage)
+            .ok_or_else(|| EcsError::ScheduleError(format!("Stage '{stage}' not found")))?;
+        
+        stage_def.depends_on.push(depends_on.to_string());
+        Ok(())
+    }
+    
+    /// Add a system to a specific stage
+    pub fn add_system_to_stage(&mut self, stage: &str, system: BoxedSystem) -> Result<()> {
+        let stage_def = self.stages.iter_mut()
+            .find(|s| s.name == stage)
+            .ok_or_else(|| EcsError::ScheduleError(format!("Stage '{stage}' not found")))?;
+        
+        let system_id = SystemId(self.systems.len() as u32);
+        stage_def.systems.push(system_id);
+        self.systems.push(system);
+        Ok(())
+    }
+
+    /// Validate stage dependencies (detect cycles)
+    pub fn validate_stages(&self) -> Result<()> {
+        // Topological sort to detect cycles
+        let mut visited = std::collections::HashSet::new();
+        let mut temp = std::collections::HashSet::new();
+        
+        fn visit(
+            stage_name: &str,
+            stages: &[Stage],
+            visited: &mut std::collections::HashSet<String>,
+            temp: &mut std::collections::HashSet<String>,
+        ) -> Result<()> {
+            if temp.contains(stage_name) {
+                return Err(EcsError::ScheduleError(format!("Circular dependency detected involving stage '{stage_name}'")));
+            }
+            if visited.contains(stage_name) {
+                return Ok(());
+            }
+            
+            temp.insert(stage_name.to_string());
+            
+            if let Some(stage) = stages.iter().find(|s| s.name == stage_name) {
+                for dep in &stage.depends_on {
+                    visit(dep, stages, visited, temp)?;
+                }
+            }
+            
+            temp.remove(stage_name);
+            visited.insert(stage_name.to_string());
+            Ok(())
+        }
+        
+        for stage in &self.stages {
+            visit(&stage.name, &self.stages, &mut visited, &mut temp)?;
+        }
+        
+        Ok(())
     }
 
     /// Convenience constructor for chaining
@@ -278,7 +361,7 @@ impl Schedule {
 
         // Group into stages (greedy)
         let mut stages = Vec::new();
-        let mut current_stage = Stage::new();
+        let mut current_stage = Stage::new("default");
 
         for &system_id in &sorted {
             let node = graph.nodes.iter().find(|n| n.id == system_id).unwrap();
@@ -286,7 +369,7 @@ impl Schedule {
             if !current_stage.try_add(system_id, &node.access, &graph) {
                 if !current_stage.systems.is_empty() {
                     stages.push(current_stage);
-                    current_stage = Stage::new();
+                    current_stage = Stage::new("default");
                 }
                 current_stage.systems.push(system_id);
             }
@@ -351,8 +434,9 @@ mod tests {
 
     #[test]
     fn test_stage_creation() {
-        let stage = Stage::new();
+        let stage = Stage::new("test");
         assert_eq!(stage.systems.len(), 0);
+        assert_eq!(stage.name, "test");
     }
 
     struct MockSystem;

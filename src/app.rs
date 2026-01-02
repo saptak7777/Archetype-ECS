@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::executor::Executor;
+use crate::hot_reload::{HotReloadManager, HotReloadApp, ReloadableSystem};
 use crate::plugin::Plugin;
 use crate::schedule::Schedule;
 use crate::system::BoxedSystem;
@@ -9,22 +10,22 @@ use crate::world::World;
 pub struct App {
     pub world: World,
     pub schedule: Schedule,
-    pub executor: Executor,
+    hot_reload_manager: HotReloadManager,
 }
 
 impl App {
     /// Create new application
     pub fn new() -> Self {
-        let schedule = Schedule::new();
         Self {
             world: World::new(),
-            executor: Executor::new(Schedule::new()),
-            schedule,
+            schedule: Schedule::new(),
+            hot_reload_manager: HotReloadManager::new(),
         }
     }
 
     /// Add a plugin
     pub fn add_plugin<P: Plugin>(&mut self, plugin: P) -> &mut Self {
+        println!("📦 Registering plugin: {}", plugin.plugin_name());
         plugin.build(self);
         self
     }
@@ -37,40 +38,9 @@ impl App {
 
     /// Run the application (one frame)
     pub fn update(&mut self) -> Result<()> {
-        // Sync schedule to executor if needed
-        // For now, we just recreate executor with current schedule
-        // In a real engine, we'd have a better way to update the executor
-        // or the executor would hold a reference to the schedule
-
-        // Note: This is a simplification. Ideally Executor holds the schedule.
-        // But Schedule is moved into Executor in current design.
-        // We need to refactor Executor to take &Schedule or clone it.
-        // For now, let's just rebuild Executor for this frame
-
-        // Actually, let's fix the design slightly.
-        // We'll keep schedule in App and pass it to Executor or have Executor hold it.
-        // The current Executor::new takes Schedule by value.
-
-        // Let's clone the schedule for execution since Schedule is cloneable (if systems are?)
-        // Systems are Box<dyn System>, which isn't Clone.
-        // So we can't clone Schedule easily.
-
-        // Alternative: App holds Executor, and we add systems directly to Executor's schedule?
-        // Or we build the schedule in App and then move it to Executor?
-
-        // Let's assume we build everything in App.schedule, then when we run, we might need to
-        // move it to executor or have executor work on it.
-
-        // For this iteration, let's make Executor take &mut Schedule.
-        // But Executor::execute_frame takes &mut self (which has schedule).
-
-        // Let's change Executor to be created with the Schedule when we start running?
-        // Or just expose executor.schedule.
-
-        self.executor.schedule = std::mem::take(&mut self.schedule);
-        self.executor.execute_frame(&mut self.world)?;
-        self.schedule = std::mem::take(&mut self.executor.schedule);
-
+        // Create executor with schedule reference for this frame
+        let mut executor = Executor::new(&mut self.schedule);
+        executor.execute_frame(&mut self.world)?;
         Ok(())
     }
 
@@ -90,12 +60,38 @@ impl Default for App {
     }
 }
 
+impl HotReloadApp for App {
+    fn hot_reload_manager(&mut self) -> &mut HotReloadManager {
+        &mut self.hot_reload_manager
+    }
+    
+    fn register_reloadable_system<S: ReloadableSystem + 'static>(&mut self, name: String, system: S) {
+        self.hot_reload_manager.register_system(name, system);
+    }
+    
+    fn check_hot_reload(&mut self) -> Result<usize> {
+        self.hot_reload_manager.check_and_reload(&mut self.world)
+    }
+    
+    fn reload_all_systems(&mut self) -> Result<usize> {
+        self.hot_reload_manager.reload_all(&mut self.world)
+    }
+    
+    fn set_hot_reload_enabled(&mut self, enabled: bool) {
+        self.hot_reload_manager.set_enabled(enabled);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     struct TestPlugin;
     impl Plugin for TestPlugin {
+        fn plugin_name(&self) -> &'static str {
+            "TestPlugin"
+        }
+        
         fn build(&self, _app: &mut App) {
             // Do nothing
         }

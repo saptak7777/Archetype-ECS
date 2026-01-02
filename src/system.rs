@@ -15,6 +15,12 @@ pub struct SystemAccess {
     pub writes: Vec<TypeId>,
 }
 
+impl Default for SystemAccess {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemAccess {
     /// Create empty access
     pub fn empty() -> Self {
@@ -22,6 +28,23 @@ impl SystemAccess {
             reads: Vec::new(),
             writes: Vec::new(),
         }
+    }
+
+    /// Create new access (alias for empty)
+    pub fn new() -> Self {
+        Self::empty()
+    }
+
+    /// Declare read access to a component
+    pub fn read<T: 'static>(mut self) -> Self {
+        self.reads.push(TypeId::of::<T>());
+        self
+    }
+
+    /// Declare write access to a component
+    pub fn write<T: 'static>(mut self) -> Self {
+        self.writes.push(TypeId::of::<T>());
+        self
     }
 
     /// Merge two accesses (union of all reads/writes)
@@ -76,6 +99,18 @@ impl SystemAccess {
     /// Check if two systems can run in parallel
     pub fn can_run_parallel(&self, other: &SystemAccess) -> bool {
         !self.conflicts_with(other)
+    }
+
+    /// Declare read access to a resource
+    pub fn resource<R: 'static>(mut self) -> Self {
+        self.reads.push(TypeId::of::<R>());
+        self
+    }
+
+    /// Declare write access to a resource
+    pub fn resource_mut<R: 'static>(mut self) -> Self {
+        self.writes.push(TypeId::of::<R>());
+        self
     }
 }
 
@@ -134,7 +169,7 @@ mod tests {
 
         fn run(&mut self, world: &mut World) -> Result<()> {
             // Spawn and immediately despawn to ensure mutable access works
-            let entity = world.spawn((42i32,));
+            let entity = world.spawn_entity((42i32,));
             world.despawn(entity).ok();
             Ok(())
         }

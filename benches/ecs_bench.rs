@@ -10,8 +10,9 @@
 //! - Archetype operations
 
 use archetype_ecs::{archetype::Archetype, QueryState, World as AaaWorld};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use hecs::World as HecsWorld;
+use std::hint::black_box;
 
 #[derive(Debug, Copy, Clone)]
 struct Position {
@@ -42,7 +43,7 @@ fn bench_spawn(c: &mut Criterion) {
         b.iter(|| {
             let mut world = AaaWorld::new();
             for i in 0..1_000 {
-                let _ = world.spawn((Position {
+                let _ = world.spawn_entity((Position {
                     x: i as f32,
                     y: 0.0,
                     z: 0.0,
@@ -68,7 +69,7 @@ fn bench_spawn(c: &mut Criterion) {
         b.iter(|| {
             let mut world = AaaWorld::new();
             for i in 0..1_000 {
-                let _ = world.spawn((
+                let _ = world.spawn_entity((
                     Position {
                         x: i as f32,
                         y: 0.0,
@@ -108,7 +109,7 @@ fn bench_spawn(c: &mut Criterion) {
         b.iter(|| {
             let mut world = AaaWorld::new();
             for i in 0..1_000 {
-                let _ = world.spawn((
+                let _ = world.spawn_entity((
                     Position {
                         x: i as f32,
                         y: 0.0,
@@ -150,7 +151,7 @@ fn bench_spawn(c: &mut Criterion) {
         b.iter(|| {
             let mut world = AaaWorld::new();
             for i in 0..1_000 {
-                let _ = world.spawn((
+                let _ = world.spawn_entity((
                     Position {
                         x: i as f32,
                         y: 0.0,
@@ -204,7 +205,7 @@ fn bench_spawn_large(c: &mut Criterion) {
                 b.iter(|| {
                     let mut world = AaaWorld::new();
                     for i in 0..count {
-                        let _ = world.spawn((
+                        let _ = world.spawn_entity((
                             Position {
                                 x: i as f32,
                                 y: 0.0,
@@ -290,7 +291,7 @@ fn bench_lookup(c: &mut Criterion) {
                 let mut world = AaaWorld::new();
                 let entities: Vec<_> = (0..count)
                     .map(|i| {
-                        world.spawn((
+                        world.spawn_entity((
                             Position {
                                 x: i as f32,
                                 y: 0.0,
@@ -349,7 +350,7 @@ fn bench_despawn(c: &mut Criterion) {
                 let mut world = AaaWorld::new();
                 let entities: Vec<_> = (0..1_000)
                     .map(|i| {
-                        world.spawn((
+                        world.spawn_entity((
                             Position {
                                 x: i as f32,
                                 y: 0.0,
@@ -409,7 +410,7 @@ fn bench_archetype_segregation(c: &mut Criterion) {
             let mut world = AaaWorld::new();
 
             for i in 0..250 {
-                let _ = world.spawn((
+                let _ = world.spawn_entity((
                     Position {
                         x: i as f32,
                         y: 0.0,
@@ -424,7 +425,7 @@ fn bench_archetype_segregation(c: &mut Criterion) {
             }
 
             for i in 0..250 {
-                let _ = world.spawn((
+                let _ = world.spawn_entity((
                     Position {
                         x: i as f32,
                         y: 0.0,
@@ -435,7 +436,7 @@ fn bench_archetype_segregation(c: &mut Criterion) {
             }
 
             for i in 0..250 {
-                let _ = world.spawn((
+                let _ = world.spawn_entity((
                     Position {
                         x: i as f32,
                         y: 0.0,
@@ -451,7 +452,7 @@ fn bench_archetype_segregation(c: &mut Criterion) {
             }
 
             for i in 0..250 {
-                let _ = world.spawn((Position {
+                let _ = world.spawn_entity((Position {
                     x: i as f32,
                     y: 0.0,
                     z: 0.0,
@@ -526,7 +527,7 @@ fn bench_query_creation(c: &mut Criterion) {
     group.bench_function("aaa_query_state_creation_10k", |b| {
         let mut world = AaaWorld::new();
         for i in 0..10_000 {
-            let _ = world.spawn((
+            let _ = world.spawn_entity((
                 Position {
                     x: i as f32,
                     y: 0.0,
@@ -550,7 +551,7 @@ fn bench_query_creation(c: &mut Criterion) {
     group.bench_function("aaa_query_iteration_cached_100k", |b| {
         let mut world = AaaWorld::new();
         for i in 0..100_000 {
-            let _ = world.spawn((
+            let _ = world.spawn_entity((
                 Position {
                     x: i as f32,
                     y: 0.0,
@@ -581,7 +582,7 @@ fn bench_query_creation(c: &mut Criterion) {
     group.bench_function("aaa_query_iteration_simd_100k", |b| {
         let mut world = AaaWorld::new();
         for i in 0..100_000 {
-            let _ = world.spawn((
+            let _ = world.spawn_entity((
                 Position {
                     x: i as f32,
                     y: 0.0,
@@ -681,7 +682,7 @@ fn bench_entity_count(c: &mut Criterion) {
     c.bench_function("aaa_entity_count_10k", |b| {
         let mut world = AaaWorld::new();
         for i in 0..10_000 {
-            let _ = world.spawn((Position {
+            let _ = world.spawn_entity((Position {
                 x: i as f32,
                 y: 0.0,
                 z: 0.0,
@@ -714,7 +715,7 @@ fn bench_archetype_count(c: &mut Criterion) {
         let mut world = AaaWorld::new();
 
         for i in 0..100 {
-            let _ = world.spawn((
+            let _ = world.spawn_entity((
                 Position {
                     x: i as f32,
                     y: 0.0,
@@ -729,7 +730,7 @@ fn bench_archetype_count(c: &mut Criterion) {
         }
 
         for i in 0..100 {
-            let _ = world.spawn((
+            let _ = world.spawn_entity((
                 Position {
                     x: i as f32,
                     y: 0.0,
@@ -740,7 +741,7 @@ fn bench_archetype_count(c: &mut Criterion) {
         }
 
         for i in 0..100 {
-            let _ = world.spawn((Position {
+            let _ = world.spawn_entity((Position {
                 x: i as f32,
                 y: 0.0,
                 z: 0.0,
@@ -753,6 +754,36 @@ fn bench_archetype_count(c: &mut Criterion) {
     });
 }
 
+fn bench_add_component_with_cache(c: &mut Criterion) {
+    let mut group = c.benchmark_group("add_component_with_cache");
+    
+    for &entity_count in &[100, 500, 1000, 5000] {
+        group.bench_with_input(
+            BenchmarkId::new("transition_cache", entity_count),
+            &entity_count,
+            |b, &entity_count| {
+                b.iter(|| {
+                    let mut world = AaaWorld::new();
+                    
+                    // Spawn entities with Position component
+                    let entities: Vec<_> = (0..entity_count)
+                        .map(|_| world.spawn_entity((Position { x: 0.0, y: 0.0, z: 0.0 },)))
+                        .collect();
+                    
+                    // Add Velocity component to all entities (this should hit the cache)
+                    for &entity in &entities {
+                        world.add_component(entity, Velocity { x: 1.0, y: 0.0, z: 0.0 }).unwrap();
+                        black_box(());
+                    }
+                    
+                    black_box(world);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 // Group all benchmarks
 criterion_group!(
     benches,
@@ -763,7 +794,8 @@ criterion_group!(
     bench_archetype_segregation,
     bench_query_creation,
     bench_entity_count,
-    bench_archetype_count
+    bench_archetype_count,
+    bench_add_component_with_cache
 );
 
 criterion_main!(benches);
