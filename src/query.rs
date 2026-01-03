@@ -23,6 +23,16 @@ use std::ptr::NonNull;
 #[cfg(feature = "profiling")]
 use tracing::info_span;
 
+/// Profiling statistics for query execution
+#[cfg(feature = "profiling")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct QueryProfilingData {
+    pub prepare_time_us: u64,
+    pub iteration_time_us: u64,
+    pub total_iterations: u64,
+    pub avg_iteration_time_us: f64,
+}
+
 use crate::archetype::{Archetype, ComponentColumn};
 use crate::component::Component;
 use crate::entity::EntityId;
@@ -50,8 +60,8 @@ impl QuerySignature {
     /// Create new empty signature
     pub fn new() -> Self {
         Self {
-            required: SmallVec::new(),
-            excluded: SmallVec::new(),
+            required: smallvec![],
+            excluded: smallvec![],
         }
     }
 
@@ -106,7 +116,12 @@ impl CachedQueryResult {
     pub fn update(&mut self, world: &World) {
         let count = world.archetype_count();
         if self.seen_archetypes < count {
-            for (id, arch) in world.archetypes().iter().enumerate().skip(self.seen_archetypes) {
+            for (id, arch) in world
+                .archetypes()
+                .iter()
+                .enumerate()
+                .skip(self.seen_archetypes)
+            {
                 if self.signature.matches(arch) {
                     self.matches.push(id);
                 }
@@ -116,7 +131,7 @@ impl CachedQueryResult {
     }
 
     /// SIMD-optimized iteration: returns chunks of components
-    /// 
+    ///
     /// # Example
     /// ```
     /// # let mut world = archetype_ecs::World::new();
@@ -126,12 +141,15 @@ impl CachedQueryResult {
     /// # let mut query = archetype_ecs::CachedQuery::<&mut f32>::new(&world);
     /// // Process components in SIMD chunks for better performance
     /// ```
+    /// # Limitations
+    /// This currently allocates a new Vec for chunks every call.
+    /// Optimize this with a reusable buffer if profiling shows it's a hotspot.
     pub fn iter_simd_chunks<T: Component + Copy>(&mut self, world: &mut World) -> Vec<&mut [T]> {
         let mut chunks = Vec::new();
-        
+
         // Update state first
         self.update(world);
-        
+
         for &archetype_id in &self.matches {
             if let Some(archetype) = world.get_archetype_mut(archetype_id) {
                 if let Some(col) = archetype.get_column_mut(std::any::TypeId::of::<T>()) {
@@ -144,7 +162,7 @@ impl CachedQueryResult {
                 }
             }
         }
-        
+
         chunks
     }
 }
@@ -279,19 +297,16 @@ where
         use rayon::prelude::*;
 
         let matched = self.query.world.get_cached_query_indices::<Q>();
-        let world_ptr = self.query.world as *mut World as usize;
         let current_tick = self.query.world.tick();
 
-        matched.par_iter().for_each(|&arch_id| {
-            // SAFETY: Each archetype is processed by a single thread via par_iter above.
-            // Distinct archetypes can be safely mutated in parallel.
-            // We cast to &'w mut World to satisfy'w lifetime requirements of QueryFetchMut.
-            let world = unsafe { &mut *(world_ptr as *mut World) };
+        // SAFETY: The scheduler/caller ensures that this parallel iteration
+        // only accesses components declared in SystemAccess.
+        let world_cell = unsafe { self.query.world.as_unsafe_world_cell() };
 
-            if let Some(archetype) = world.get_archetype_mut(arch_id) {
-                // SAFETY: We must cast to the expected lifetime 'w. This is safe because
-                // the World is mutably borrowed for 'w and we are accessing distinct archetypes.
-                let archetype_w = unsafe { &mut *(archetype as *mut Archetype) };
+        matched.par_iter().for_each(|&arch_id| {
+            if let Some(archetype_ptr) = unsafe { world_cell.get_archetype_ptr(arch_id) } {
+                // SAFETY: We have unique access to this archetype in this thread.
+                let archetype_w = unsafe { &mut *archetype_ptr.as_ptr() };
                 let len = archetype_w.len();
                 if let Some(mut state) = Q::prepare(archetype_w, 0, current_tick) {
                     for row in 0..len {
@@ -371,7 +386,6 @@ where
                 }
 
                 let ptr = self.archetypes[self.archetype_index].as_ptr();
-                // SAFETY: Ptr valid from World, 'w lifetime
                 self.state = Q::prepare(unsafe { &*ptr }, self.change_tick);
                 self.entity_index = 0;
 
@@ -397,7 +411,7 @@ where
             let row = self.entity_index;
             self.entity_index += 1;
 
-            // SAFETY: bounds checked above. State valid.
+            // SAFETY: Row bounds checked above, state valid
             if let Some(item) = unsafe { Q::fetch(self.state.as_ref().unwrap(), row) } {
                 return Some(item);
             }
@@ -518,7 +532,7 @@ where
             let row = self.entity_index;
             self.entity_index += 1;
 
-            // SAFETY: Bounds checked. State is valid.
+            // SAFETY: Bounds checked, state valid
             if let Some(item) = unsafe { Q::fetch(self.state.as_mut().unwrap(), row) } {
                 return Some(item);
             }
@@ -650,8 +664,7 @@ unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w mut T {
 
     unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
         let (column_ptr, current_tick) = state;
-        // SAFETY: The column pointer is valid for the lifetime 'w and points to a valid ComponentColumn.
-        // The caller ensures that row is a valid index within the column.
+        // SAFETY: Column pointer valid for 'w, row bounds checked
         let column = unsafe { &mut **column_ptr };
         column.set_changed_tick(row, *current_tick);
         column.get_mut::<T>(row)
@@ -676,7 +689,7 @@ unsafe impl<'w, T: Component> QueryFetchMut<'w> for &'w T {
     }
 
     unsafe fn fetch(state: &mut Self::State, row: usize) -> Option<Self::Item> {
-        // SAFETY: The pointer is valid for the lifetime 'w
+        // SAFETY: Pointer valid for 'w lifetime
         let column = unsafe { &**state };
         column.get::<T>(row)
     }
@@ -915,7 +928,10 @@ unsafe impl<'w, A: QueryFetch<'w>, B: QueryFetch<'w>, C: QueryFetch<'w>, D: Quer
 pub struct QueryState<F> {
     matches: Vec<usize>,
     seen_archetypes: usize,
-    _phantom: PhantomData<F>,
+    phantom: PhantomData<F>,
+
+    #[cfg(feature = "profiling")]
+    pub profiling_data: QueryProfilingData,
 }
 
 impl<F: QueryFilter> QueryState<F> {
@@ -925,35 +941,52 @@ impl<F: QueryFilter> QueryState<F> {
         #[cfg(feature = "profiling")]
         let span = info_span!("query_state.new", archetype_count = world.archetype_count());
         #[cfg(feature = "profiling")]
-        let _span_guard = span.enter();
+        let start = std::time::Instant::now();
 
-        let matched = world
-            .archetypes()
-            .iter()
-            .enumerate()
-            .filter_map(|(id, arch)| {
-                if F::matches_archetype(arch) {
-                    Some(id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Use get_cached_query_indices which is public or available
+        // Note: World typically only exposes indices for internal use, assuming get_cached_query_indices is available.
+        // It returns &[usize].
+        let matched = world.get_cached_query_indices::<F>();
+
+        #[cfg(feature = "profiling")]
+        let prepare_time_us = start.elapsed().as_micros() as u64;
 
         Self {
-            matches: matched,
-            seen_archetypes: world.archetype_count(),
-            _phantom: PhantomData,
+            matches: matched.to_vec(),
+            seen_archetypes: world.archetypes().len(),
+            phantom: PhantomData,
+
+            #[cfg(feature = "profiling")]
+            profiling_data: QueryProfilingData {
+                prepare_time_us,
+                ..Default::default()
+            },
         }
     }
 
     /// Iterate query results
     ///
-    pub fn iter<'w, 's>(&'s self, world: &'w World, change_tick: u32) -> QueryIter<'w, F>
+    pub fn iter<'w>(&self, world: &'w World, change_tick: u32) -> QueryIter<'w, F>
     where
         F: QueryFetch<'w>,
     {
+        #[cfg(feature = "profiling")]
+        let _span = info_span!("QueryState::iter", matches = ?self.matches.len()).entered();
+
+        // Note: we can't update profiling_data here because iter takes &self immutable.
+        // For read-only queries we just log spans.
+
         QueryIter::new(world, &self.matches, change_tick)
+    }
+
+    #[cfg(feature = "profiling")]
+    pub fn profiling_summary(&self) -> String {
+        format!(
+            "Query profiling: prep={:.2}μs, iter={:.2}μs, iterations={}",
+            self.profiling_data.prepare_time_us as f64,
+            self.profiling_data.avg_iteration_time_us,
+            self.profiling_data.total_iterations
+        )
     }
 
     /// Iterate query results mutably
@@ -990,7 +1023,7 @@ impl<F: QueryFilter> QueryState<F> {
     }
 
     /// SIMD-optimized iteration: returns chunks of components
-    /// 
+    ///
     /// # Example
     /// ```
     /// # let mut world = archetype_ecs::World::new();
@@ -1002,10 +1035,10 @@ impl<F: QueryFilter> QueryState<F> {
     /// ```
     pub fn iter_simd_chunks<T: Component + Copy>(&mut self, world: &mut World) -> Vec<&mut [T]> {
         let mut chunks = Vec::new();
-        
+
         // Update state first
         self.update(world);
-        
+
         for &archetype_id in &self.matches {
             if let Some(archetype) = world.get_archetype_mut(archetype_id) {
                 if let Some(col) = archetype.get_column_mut(std::any::TypeId::of::<T>()) {
@@ -1018,7 +1051,7 @@ impl<F: QueryFilter> QueryState<F> {
                 }
             }
         }
-        
+
         chunks
     }
 }
@@ -1243,6 +1276,12 @@ impl<T: 'static> QueryFilter for Without<T> {
 
     fn type_ids() -> SmallVec<[TypeId; MAX_FILTER_COMPONENTS]> {
         smallvec![] // Without doesn't require component presence for storage access
+    }
+
+    fn signature() -> QuerySignature {
+        let mut sig = QuerySignature::new();
+        sig.excluded.push(TypeId::of::<T>());
+        sig
     }
 }
 
@@ -1654,5 +1693,94 @@ mod tests {
         }
         // Let's use world.get_component_mut logic if available, or just overwrite archetype data
         // For this test, we assume standard mutable queries update ticks.
+    }
+}
+// ... existing code ...
+
+/// Optimized view for repeated query iteration
+///
+/// Pre-calculates component pointers to avoid hash lookups during iteration.
+/// Best for hot loops where the same query is iterated multiple times within a frame.
+pub struct View<'w, Q: QueryFilter + QueryFetch<'w>> {
+    states: Vec<(usize, Q::State)>,
+    _phantom: PhantomData<&'w Q>,
+}
+
+impl<'w, Q: QueryFilter + QueryFetch<'w>> View<'w, Q> {
+    /// Create a new view from the world
+    pub fn new(world: &'w World, change_tick: u32) -> Self {
+        let matched = world.get_cached_query_indices::<Q>();
+        let mut states = Vec::with_capacity(matched.len());
+
+        for &id in &matched {
+            if let Some(archetype) = world.get_archetype(id) {
+                if !archetype.is_empty() {
+                    if let Some(state) = Q::prepare(archetype, change_tick) {
+                        states.push((archetype.len(), state));
+                    }
+                }
+            }
+        }
+
+        Self {
+            states,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Iterate over the view
+    pub fn iter<'v>(&'v self) -> ViewIter<'v, 'w, Q> {
+        ViewIter {
+            view: self,
+            chunk_index: 0,
+            entity_index: 0,
+        }
+    }
+}
+
+impl<'v, 'w, Q: QueryFilter + QueryFetch<'w>> IntoIterator for &'v View<'w, Q> {
+    type Item = Q::Item;
+    type IntoIter = ViewIter<'v, 'w, Q>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Iterator for View
+pub struct ViewIter<'v, 'w, Q: QueryFilter + QueryFetch<'w>> {
+    view: &'v View<'w, Q>,
+    chunk_index: usize,
+    entity_index: usize,
+}
+
+impl<'v, 'w, Q: QueryFilter + QueryFetch<'w>> Iterator for ViewIter<'v, 'w, Q> {
+    type Item = Q::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.chunk_index >= self.view.states.len() {
+                return None;
+            }
+
+            let (len, ref state) = self.view.states[self.chunk_index];
+
+            if self.entity_index >= len {
+                self.chunk_index += 1;
+                self.entity_index = 0;
+                continue;
+            }
+
+            let row = self.entity_index;
+            self.entity_index += 1;
+
+            // SAFETY:
+            // 1. row < len checked above
+            // 2. state comes from Q::prepare
+            // 3. View holds &'w World, so pointers are valid
+            if let Some(item) = unsafe { Q::fetch(state, row) } {
+                return Some(item);
+            }
+        }
     }
 }

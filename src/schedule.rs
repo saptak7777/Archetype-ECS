@@ -12,7 +12,14 @@ use crate::system::{BoxedSystem, System, SystemAccess, SystemId};
 #[derive(Debug, Clone)]
 pub struct SystemNode {
     pub id: SystemId,
-    pub access: SystemAccess,
+    pub accesses: SystemAccess,
+}
+
+/// Execution plan for a single named stage
+#[derive(Debug, Clone)]
+pub struct StageExecutionPlan {
+    pub name: String,
+    pub parallel_groups: Vec<crate::dependency::ExecutionStage>,
 }
 
 /// Dependency graph for systems
@@ -32,8 +39,8 @@ impl SystemGraph {
         // Create nodes
         for (i, system) in systems.iter().enumerate() {
             let id = SystemId(i as u32);
-            let access = system.access();
-            nodes.push(SystemNode { id, access });
+            let accesses = system.accesses();
+            nodes.push(SystemNode { id, accesses });
             edges.insert(id, Vec::new());
             reverse_edges.insert(id, Vec::new());
         }
@@ -44,7 +51,7 @@ impl SystemGraph {
                 let id_a = nodes[i].id;
                 let id_b = nodes[j].id;
 
-                if nodes[i].access.conflicts_with(&nodes[j].access) {
+                if nodes[i].accesses.conflicts_with(&nodes[j].accesses) {
                     edges.get_mut(&id_a).unwrap().push(id_b);
                     reverse_edges.get_mut(&id_b).unwrap().push(id_a);
                 }
@@ -108,7 +115,7 @@ impl SystemGraph {
 pub struct Stage {
     pub name: String,
     pub systems: Vec<SystemId>,
-    pub depends_on: Vec<String>,  // Names of stages this depends on
+    pub depends_on: Vec<String>, // Names of stages this depends on
 }
 
 impl Stage {
@@ -131,7 +138,7 @@ impl Stage {
         for &existing_id in &self.systems {
             let existing_node = _graph.nodes.iter().find(|n| n.id == existing_id).unwrap();
 
-            if access.conflicts_with(&existing_node.access) {
+            if access.conflicts_with(&existing_node.accesses) {
                 return false;
             }
         }
@@ -161,6 +168,7 @@ pub struct Schedule {
     pub(crate) stages: Vec<Stage>,
     pub(crate) graph: Option<SystemGraph>,
     pub(crate) ordering_constraints: Vec<OrderingConstraint>,
+    pub(crate) parallel_plan: Vec<StageExecutionPlan>,
 }
 
 impl Default for Schedule {
@@ -177,6 +185,7 @@ impl Schedule {
             stages: Vec::new(),
             graph: None,
             ordering_constraints: Vec::new(),
+            parallel_plan: Vec::new(),
         }
         .build()
     }
@@ -188,13 +197,16 @@ impl Schedule {
             stages: Vec::new(),
             graph: None,
             ordering_constraints: Vec::new(),
+            parallel_plan: Vec::new(),
         }
     }
 
     /// Add a new named stage
     pub fn add_stage(&mut self, name: &str) -> Result<()> {
         if self.stages.iter().any(|s| s.name == name) {
-            return Err(EcsError::ScheduleError(format!("Stage '{name}' already exists")));
+            return Err(EcsError::ScheduleError(format!(
+                "Stage '{name}' already exists"
+            )));
         }
         self.stages.push(Stage {
             name: name.to_string(),
@@ -203,28 +215,34 @@ impl Schedule {
         });
         Ok(())
     }
-    
+
     /// Add dependency from one stage to another
     pub fn add_stage_dependency(&mut self, stage: &str, depends_on: &str) -> Result<()> {
         // Check if dependency stage exists first
         if !self.stages.iter().any(|s| s.name == depends_on) {
-            return Err(EcsError::ScheduleError(format!("Dependency stage '{depends_on}' not found")));
+            return Err(EcsError::ScheduleError(format!(
+                "Dependency stage '{depends_on}' not found"
+            )));
         }
-        
-        let stage_def = self.stages.iter_mut()
+
+        let stage_def = self
+            .stages
+            .iter_mut()
             .find(|s| s.name == stage)
             .ok_or_else(|| EcsError::ScheduleError(format!("Stage '{stage}' not found")))?;
-        
+
         stage_def.depends_on.push(depends_on.to_string());
         Ok(())
     }
-    
+
     /// Add a system to a specific stage
     pub fn add_system_to_stage(&mut self, stage: &str, system: BoxedSystem) -> Result<()> {
-        let stage_def = self.stages.iter_mut()
+        let stage_def = self
+            .stages
+            .iter_mut()
             .find(|s| s.name == stage)
             .ok_or_else(|| EcsError::ScheduleError(format!("Stage '{stage}' not found")))?;
-        
+
         let system_id = SystemId(self.systems.len() as u32);
         stage_def.systems.push(system_id);
         self.systems.push(system);
@@ -236,7 +254,7 @@ impl Schedule {
         // Topological sort to detect cycles
         let mut visited = std::collections::HashSet::new();
         let mut temp = std::collections::HashSet::new();
-        
+
         fn visit(
             stage_name: &str,
             stages: &[Stage],
@@ -244,29 +262,31 @@ impl Schedule {
             temp: &mut std::collections::HashSet<String>,
         ) -> Result<()> {
             if temp.contains(stage_name) {
-                return Err(EcsError::ScheduleError(format!("Circular dependency detected involving stage '{stage_name}'")));
+                return Err(EcsError::ScheduleError(format!(
+                    "Circular dependency detected involving stage '{stage_name}'"
+                )));
             }
             if visited.contains(stage_name) {
                 return Ok(());
             }
-            
+
             temp.insert(stage_name.to_string());
-            
+
             if let Some(stage) = stages.iter().find(|s| s.name == stage_name) {
                 for dep in &stage.depends_on {
                     visit(dep, stages, visited, temp)?;
                 }
             }
-            
+
             temp.remove(stage_name);
             visited.insert(stage_name.to_string());
             Ok(())
         }
-        
+
         for stage in &self.stages {
             visit(&stage.name, &self.stages, &mut visited, &mut temp)?;
         }
-        
+
         Ok(())
     }
 
@@ -330,7 +350,8 @@ impl Schedule {
 
     fn invalidate(&mut self) {
         self.graph = None;
-        self.stages.clear();
+        // Don't clear stages, they are part of the definition
+        self.parallel_plan.clear();
     }
 
     /// Get mutable reference to a system by name
@@ -356,32 +377,95 @@ impl Schedule {
     }
 
     fn rebuild(&mut self) -> Result<()> {
-        let graph = SystemGraph::build(&self.systems);
-        let sorted = graph.topological_sort()?;
-
-        // Group into stages (greedy)
-        let mut stages = Vec::new();
-        let mut current_stage = Stage::new("default");
-
-        for &system_id in &sorted {
-            let node = graph.nodes.iter().find(|n| n.id == system_id).unwrap();
-
-            if !current_stage.try_add(system_id, &node.access, &graph) {
-                if !current_stage.systems.is_empty() {
-                    stages.push(current_stage);
-                    current_stage = Stage::new("default");
-                }
-                current_stage.systems.push(system_id);
+        // 1. If no stages defined, create a default one
+        if self.stages.is_empty() {
+            let mut default_stage = Stage::new("default");
+            for i in 0..self.systems.len() {
+                default_stage.systems.push(SystemId(i as u32));
             }
+            self.stages.push(default_stage);
         }
 
-        if !current_stage.systems.is_empty() {
-            stages.push(current_stage);
+        // 2. Validate and sort stages
+        self.validate_stages()?;
+        let sorted_stages = self.topological_sort_stages_internal()?;
+
+        // 3. For each stage, build parallel execution plan
+        let mut parallel_plan = Vec::with_capacity(sorted_stages.len());
+        let all_accesses = self.get_accesses();
+
+        for stage in sorted_stages {
+            // Filter accesses for systems in this stage
+            let stage_system_ids = &stage.systems;
+            if stage_system_ids.is_empty() {
+                continue;
+            }
+
+            let stage_accesses: Vec<SystemAccess> = stage_system_ids
+                .iter()
+                .map(|id| all_accesses[id.0 as usize].clone())
+                .collect();
+
+            let dep_graph = crate::dependency::DependencyGraph::new(stage_accesses);
+            let mut stage_parallel_groups = dep_graph.stages().to_vec();
+
+            // Map indices back to global SystemId indices
+            for group in &mut stage_parallel_groups {
+                for idx in &mut group.system_indices {
+                    *idx = stage_system_ids[*idx].0 as usize;
+                }
+            }
+
+            parallel_plan.push(StageExecutionPlan {
+                name: stage.name.clone(),
+                parallel_groups: stage_parallel_groups,
+            });
         }
 
-        self.graph = Some(graph);
-        self.stages = stages;
+        self.parallel_plan = parallel_plan;
+        self.graph = Some(SystemGraph::build(&self.systems));
+
         Ok(())
+    }
+
+    fn topological_sort_stages_internal(&self) -> Result<Vec<Stage>> {
+        let mut sorted = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut temp = std::collections::HashSet::new();
+
+        fn visit(
+            stage: &Stage,
+            all_stages: &[Stage],
+            sorted: &mut Vec<Stage>,
+            visited: &mut std::collections::HashSet<String>,
+            temp: &mut std::collections::HashSet<String>,
+        ) -> Result<()> {
+            if temp.contains(&stage.name) {
+                return Err(EcsError::SystemCycleDetected);
+            }
+            if visited.contains(&stage.name) {
+                return Ok(());
+            }
+
+            temp.insert(stage.name.clone());
+
+            for dep_name in &stage.depends_on {
+                if let Some(dep_stage) = all_stages.iter().find(|s| s.name == *dep_name) {
+                    visit(dep_stage, all_stages, sorted, visited, temp)?;
+                }
+            }
+
+            temp.remove(&stage.name);
+            visited.insert(stage.name.clone());
+            sorted.push(stage.clone());
+            Ok(())
+        }
+
+        for stage in &self.stages {
+            visit(stage, &self.stages, &mut sorted, &mut visited, &mut temp)?;
+        }
+
+        Ok(sorted)
     }
 
     /// Get stage count
@@ -412,7 +496,7 @@ impl Schedule {
 
     /// Get system accesses for dependency analysis
     pub fn get_accesses(&self) -> Vec<SystemAccess> {
-        self.systems.iter().map(|s| s.access()).collect()
+        self.systems.iter().map(|s| s.accesses()).collect()
     }
 
     /// Build parallel execution stages
@@ -441,13 +525,17 @@ mod tests {
 
     struct MockSystem;
     impl crate::system::System for MockSystem {
-        fn run(&mut self, _world: &mut crate::World) -> crate::error::Result<()> {
+        fn run(
+            &mut self,
+            _world: &mut crate::World,
+            _commands: &mut crate::command::CommandBuffer,
+        ) -> crate::error::Result<()> {
             Ok(())
         }
         fn name(&self) -> &'static str {
             "MockSystem"
         }
-        fn access(&self) -> crate::system::SystemAccess {
+        fn accesses(&self) -> crate::system::SystemAccess {
             crate::system::SystemAccess {
                 reads: vec![],
                 writes: vec![],

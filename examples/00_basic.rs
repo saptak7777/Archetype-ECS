@@ -22,29 +22,26 @@ struct Velocity {
 
 fn main() {
     println!("=== Basic ECS Example ===");
-    
+
     // Create world
     let mut world = World::new();
-    
+
     // Spawn entities with components
     println!("Spawning entities...");
-    for i in 0..10 {
-        world.spawn((
-            Position { x: i as f32, y: i as f32 },
-            Velocity { x: 0.1, y: 0.0 },
-        ));
+    for _ in 0..10 {
+        world.spawn_entity((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 1.0 }));
     }
-    
+
     println!("Spawned {} entities", world.entity_count());
-    
+
     // Query entities
     println!("Querying entities...");
     let count = world.query::<&Position>().iter().count();
     println!("Found {count} entities with Position");
-    
+
     // Despawn an entity
     println!("Despawning entities...");
     // Note: In a real implementation, you'd track entity IDs
-    
+
     println!("=== Example Complete ===");
 }

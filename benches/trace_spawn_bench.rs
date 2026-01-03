@@ -25,21 +25,17 @@ fn main() {
 
     // Warm up
     for _ in 0..1000 {
-        world
-            .spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)))
-            .unwrap();
+        world.spawn_entity((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)));
     }
 
     // Profile spawn with 3 components
     let start = Instant::now();
     for i in 0..10_000 {
-        world
-            .spawn((
-                Position(1.0, 2.0, 3.0),
-                Velocity(1.0, 0.0, 0.0),
-                Health(100),
-            ))
-            .unwrap();
+        world.spawn_entity((
+            Position(1.0, 2.0, 3.0),
+            Velocity(1.0, 0.0, 0.0),
+            Health(100),
+        ));
     }
     println!("Spawn 10k entities: {:?}", start.elapsed());
 }

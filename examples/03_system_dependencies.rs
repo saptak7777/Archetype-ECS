@@ -1,12 +1,12 @@
 //! Example 3: System Dependencies and Stages
-//! 
+//!
 //! This example demonstrates:
 //! - Creating named stages with dependencies
 //! - Adding systems to specific stages
 //! - Understanding system execution order
 //! - Using the App API for system management
 
-use archetype_ecs::{World, App, System, SystemAccess};
+use archetype_ecs::{App, ComponentId, System, SystemAccess, World};
 
 #[derive(Clone)]
 struct Position {
@@ -33,10 +33,10 @@ struct Transform {
 struct MovementSystem;
 
 impl System for MovementSystem {
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         let mut access = SystemAccess::empty();
-        access.reads.push(std::any::TypeId::of::<Velocity>());
-        access.writes.push(std::any::TypeId::of::<Position>());
+        access.reads.push(ComponentId::of::<Velocity>());
+        access.writes.push(ComponentId::of::<Position>());
         access
     }
 
@@ -44,9 +44,13 @@ impl System for MovementSystem {
         "MovementSystem"
     }
 
-    fn run(&mut self, world: &mut World) -> Result<(), archetype_ecs::error::EcsError> {
+    fn run(
+        &mut self,
+        world: &mut World,
+        _commands: &mut archetype_ecs::command::CommandBuffer,
+    ) -> Result<(), archetype_ecs::error::EcsError> {
         println!("  Running MovementSystem...");
-        
+
         let mut moved_count = 0;
         for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>().iter() {
             pos.x += vel.x;
@@ -54,7 +58,7 @@ impl System for MovementSystem {
             pos.z += vel.z;
             moved_count += 1;
         }
-        
+
         println!("    Moved {moved_count} entities");
         Ok(())
     }
@@ -64,10 +68,10 @@ impl System for MovementSystem {
 struct TransformSystem;
 
 impl System for TransformSystem {
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         let mut access = SystemAccess::empty();
-        access.reads.push(std::any::TypeId::of::<Position>());
-        access.writes.push(std::any::TypeId::of::<Transform>());
+        access.reads.push(ComponentId::of::<Position>());
+        access.writes.push(ComponentId::of::<Transform>());
         access
     }
 
@@ -75,16 +79,20 @@ impl System for TransformSystem {
         "TransformSystem"
     }
 
-    fn run(&mut self, world: &mut World) -> Result<(), archetype_ecs::error::EcsError> {
+    fn run(
+        &mut self,
+        world: &mut World,
+        _commands: &mut archetype_ecs::command::CommandBuffer,
+    ) -> Result<(), archetype_ecs::error::EcsError> {
         println!("  Running TransformSystem...");
-        
+
         let mut transformed_count = 0;
         for _pos in world.query::<&Position>().iter() {
             // In a real system, you'd calculate actual transforms
             // For this example, we'll just count
             transformed_count += 1;
         }
-        
+
         println!("    Calculated transforms for {transformed_count} entities");
         Ok(())
     }
@@ -94,10 +102,10 @@ impl System for TransformSystem {
 struct RenderSystem;
 
 impl System for RenderSystem {
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         let mut access = SystemAccess::empty();
-        access.reads.push(std::any::TypeId::of::<Position>());
-        access.reads.push(std::any::TypeId::of::<Transform>());
+        access.reads.push(ComponentId::of::<Position>());
+        access.reads.push(ComponentId::of::<Transform>());
         access
     }
 
@@ -105,16 +113,20 @@ impl System for RenderSystem {
         "RenderSystem"
     }
 
-    fn run(&mut self, world: &mut World) -> Result<(), archetype_ecs::error::EcsError> {
+    fn run(
+        &mut self,
+        world: &mut World,
+        _commands: &mut archetype_ecs::command::CommandBuffer,
+    ) -> Result<(), archetype_ecs::error::EcsError> {
         println!("  Running RenderSystem...");
-        
+
         let mut rendered_count = 0;
         for (_pos, _transform) in world.query::<(&Position, &Transform)>().iter() {
             // In a real system, you'd actually render
             // For this example, we'll just count
             rendered_count += 1;
         }
-        
+
         println!("    Rendered {rendered_count} entities");
         Ok(())
     }
@@ -124,7 +136,7 @@ impl System for RenderSystem {
 struct CleanupSystem;
 
 impl System for CleanupSystem {
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         SystemAccess::empty()
     }
 
@@ -132,9 +144,13 @@ impl System for CleanupSystem {
         "CleanupSystem"
     }
 
-    fn run(&mut self, _world: &mut World) -> Result<(), archetype_ecs::error::EcsError> {
+    fn run(
+        &mut self,
+        _world: &mut World,
+        _commands: &mut archetype_ecs::command::CommandBuffer,
+    ) -> Result<(), archetype_ecs::error::EcsError> {
         println!("  Running CleanupSystem...");
-        
+
         // In a real system, you'd remove old entities
         println!("    Cleaned up old entities");
         Ok(())
@@ -143,72 +159,96 @@ impl System for CleanupSystem {
 
 fn main() {
     println!("=== System Dependencies and Stages Example ===\n");
-    
+
     // Create app with stages
     let mut app = App::new();
-    
+
     // Define stages with dependencies
     println!("Setting up stages with dependencies...");
-    
+
     // Create stages
     app.schedule.add_stage("physics").unwrap();
     app.schedule.add_stage("transform").unwrap();
     app.schedule.add_stage("render").unwrap();
     app.schedule.add_stage("cleanup").unwrap();
-    
+
     // Define dependencies: physics -> transform -> render -> cleanup
-    app.schedule.add_stage_dependency("transform", "physics").unwrap();
-    app.schedule.add_stage_dependency("render", "transform").unwrap();
-    app.schedule.add_stage_dependency("cleanup", "render").unwrap();
-    
+    app.schedule
+        .add_stage_dependency("transform", "physics")
+        .unwrap();
+    app.schedule
+        .add_stage_dependency("render", "transform")
+        .unwrap();
+    app.schedule
+        .add_stage_dependency("cleanup", "render")
+        .unwrap();
+
     println!("Stage dependencies:");
     println!("  physics -> transform -> render -> cleanup\n");
-    
+
     // Add systems to stages
     println!("Adding systems to stages...");
-    
+
     // Add systems to appropriate stages
-    app.schedule.add_system_to_stage("physics", Box::new(MovementSystem)).unwrap();
-    app.schedule.add_system_to_stage("transform", Box::new(TransformSystem)).unwrap();
-    app.schedule.add_system_to_stage("render", Box::new(RenderSystem)).unwrap();
-    app.schedule.add_system_to_stage("cleanup", Box::new(CleanupSystem)).unwrap();
-    
+    app.schedule
+        .add_system_to_stage("physics", Box::new(MovementSystem))
+        .unwrap();
+    app.schedule
+        .add_system_to_stage("transform", Box::new(TransformSystem))
+        .unwrap();
+    app.schedule
+        .add_system_to_stage("render", Box::new(RenderSystem))
+        .unwrap();
+    app.schedule
+        .add_system_to_stage("cleanup", Box::new(CleanupSystem))
+        .unwrap();
+
     println!("Systems added:");
     println!("  physics: MovementSystem");
     println!("  transform: TransformSystem");
     println!("  render: RenderSystem");
     println!("  cleanup: CleanupSystem\n");
-    
+
     // Spawn some test entities
     println!("Spawning test entities...");
     for i in 0..100 {
-        app.world.spawn((
-            Position { x: i as f32, y: 0.0, z: 0.0 },
-            Velocity { x: 0.1, y: 0.0, z: 0.0 },
+        app.world.spawn_entity((
+            Position {
+                x: i as f32,
+                y: 0.0,
+                z: 0.0,
+            },
+            Velocity {
+                x: 0.1,
+                y: 0.0,
+                z: 0.0,
+            },
             Transform {
-                matrix: [[1.0, 0.0, 0.0, 0.0],
-                        [0.0, 1.0, 0.0, 0.0],
-                        [0.0, 0.0, 1.0, 0.0],
-                        [0.0, 0.0, 0.0, 1.0]],
+                matrix: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
             },
         ));
     }
-    
+
     println!("Spawned {} entities\n", app.world.entity_count());
-    
+
     // Run one frame to demonstrate system execution
     println!("=== Running Systems (One Frame) ===");
-    
+
     if let Err(e) = app.update() {
         println!("Error running systems: {e:?}");
     }
-    
+
     println!("\n=== Key Concepts Demonstrated ===");
     println!("1. Named Stages: Organize systems into logical groups");
     println!("2. Stage Dependencies: Control execution order between stages");
     println!("3. System Registration: Add systems to specific stages");
     println!("4. Execution Order: Systems run in dependency order");
     println!("5. App API: High-level interface for system management");
-    
+
     println!("\n=== Example Complete ===");
 }

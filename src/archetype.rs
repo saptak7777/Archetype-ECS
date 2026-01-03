@@ -74,6 +74,15 @@ impl<'a> ArchetypeChunkMut<'a> {
     }
 }
 
+/// Outgoing transitions from an archetype
+#[derive(Default)]
+pub struct ArchetypeEdges {
+    /// Transitions when adding a component
+    pub add: FxHashMap<TypeId, usize>,
+    /// Transitions when removing a component
+    pub remove: FxHashMap<TypeId, usize>,
+}
+
 /// Archetype: Structure of Arrays storage
 pub struct Archetype {
     signature: ArchetypeSignature,
@@ -81,6 +90,7 @@ pub struct Archetype {
     components: Vec<ComponentColumn>,
     component_indices: FxHashMap<TypeId, usize>,
     columns_initialized: bool,
+    edges: ArchetypeEdges,
 }
 
 impl Archetype {
@@ -101,6 +111,7 @@ impl Archetype {
             components: Vec::new(),
             component_indices: FxHashMap::default(),
             columns_initialized: false,
+            edges: ArchetypeEdges::default(),
         };
         archetype.reserve_rows(128);
         archetype
@@ -109,6 +120,26 @@ impl Archetype {
     /// Get signature
     pub fn signature(&self) -> &ArchetypeSignature {
         &self.signature
+    }
+
+    /// Get outgoing "add" transition for a component type
+    pub fn get_add_edge(&self, type_id: TypeId) -> Option<usize> {
+        self.edges.add.get(&type_id).copied()
+    }
+
+    /// Set outgoing "add" transition for a component type
+    pub fn set_add_edge(&mut self, type_id: TypeId, target_id: usize) {
+        self.edges.add.insert(type_id, target_id);
+    }
+
+    /// Get outgoing "remove" transition for a component type
+    pub fn get_remove_edge(&self, type_id: TypeId) -> Option<usize> {
+        self.edges.remove.get(&type_id).copied()
+    }
+
+    /// Set outgoing "remove" transition for a component type
+    pub fn set_remove_edge(&mut self, type_id: TypeId, target_id: usize) {
+        self.edges.remove.insert(type_id, target_id);
     }
 
     /// Check if archetype has a component type
@@ -232,9 +263,34 @@ impl Archetype {
         self.component_indices.get(&type_id).copied()
     }
 
-    /// Get component column by precomputed index
+    /// Get column by index
     pub fn get_column_mut_by_index(&mut self, index: usize) -> Option<&mut ComponentColumn> {
         self.components.get_mut(index)
+    }
+
+    /// Get raw pointer to column by type ID
+    ///
+    /// # Safety
+    /// Returned pointer is valid as long as archetype is not reallocated.
+    pub(crate) unsafe fn get_column_raw(&self, type_id: TypeId) -> Option<*const ComponentColumn> {
+        let idx = *self.component_indices.get(&type_id)?;
+        self.components
+            .get(idx)
+            .map(|c| c as *const ComponentColumn)
+    }
+
+    /// Get raw mutable pointer to column by type ID
+    ///
+    /// # Safety
+    /// Returned pointer is valid as long as archetype is not reallocated.
+    pub(crate) unsafe fn get_column_raw_mut(
+        &mut self,
+        type_id: TypeId,
+    ) -> Option<*mut ComponentColumn> {
+        let idx = *self.component_indices.get(&type_id)?;
+        self.components
+            .get_mut(idx)
+            .map(|c| c as *mut ComponentColumn)
     }
 
     pub fn get_component_slice<T: Component>(&self) -> Option<&[T]> {
@@ -526,12 +582,16 @@ impl ComponentColumn {
         }
 
         // SAFETY: Use checked arithmetic and bounds validation
-        let offset = index.checked_mul(self.item_size)
+        let offset = index
+            .checked_mul(self.item_size)
             .expect("index * item_size overflow");
-        
+
         // Ensure offset is within capacity bounds
-        assert!(offset + self.item_size <= self.cap, "Pointer arithmetic overflow");
-        
+        assert!(
+            offset + self.item_size <= self.cap,
+            "Pointer arithmetic overflow"
+        );
+
         unsafe { self.ptr.add(offset) }
     }
 

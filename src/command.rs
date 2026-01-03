@@ -14,29 +14,39 @@
 
 //! Command buffer with struct variants
 
+use crate::component::Component;
 use crate::entity::EntityId;
 use crate::error::Result;
-use crate::world::World;
+pub use crate::world::World;
+
+/// Type alias for world mutation closures
+pub type CommandClosure = Box<dyn FnOnce(&mut World) -> Result<()> + Send>;
 
 /// Deferred command for world mutations  
-#[derive(Debug)]
+/// Deferred command for world mutations  
 pub enum Command {
     /// Spawn entity with closure
-    Spawn {
-        bundle_fn: fn(&mut World) -> Result<()>,
-    },
+    Spawn(CommandClosure),
 
     /// Despawn entity
     Despawn(EntityId),
 
-    /// Add component to entity
-    AddComponent(EntityId),
+    /// Custom world mutation
+    Custom(CommandClosure),
+}
 
-    /// Remove component from entity
-    RemoveComponent(EntityId),
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Command::Spawn(_) => write!(f, "Spawn(...)"),
+            Command::Despawn(e) => f.debug_tuple("Despawn").field(e).finish(),
+            Command::Custom(_) => write!(f, "Custom(...)"),
+        }
+    }
 }
 
 /// Command buffer for deferred operations
+#[derive(Default)]
 pub struct CommandBuffer {
     commands: Vec<Command>,
 }
@@ -44,9 +54,7 @@ pub struct CommandBuffer {
 impl CommandBuffer {
     /// Create new command buffer
     pub fn new() -> Self {
-        Self {
-            commands: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Create with capacity
@@ -55,10 +63,15 @@ impl CommandBuffer {
             commands: Vec::with_capacity(capacity),
         }
     }
+}
 
-    /// Queue spawn command
-    pub fn spawn(&mut self, bundle_fn: fn(&mut World) -> Result<()>) {
-        self.commands.push(Command::Spawn { bundle_fn });
+impl CommandBuffer {
+    /// Queue spawn command with a stateful closure
+    pub fn spawn<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut World) -> Result<()> + Send + 'static,
+    {
+        self.commands.push(Command::Spawn(Box::new(f)));
     }
 
     /// Queue despawn command
@@ -66,9 +79,40 @@ impl CommandBuffer {
         self.commands.push(Command::Despawn(entity));
     }
 
-    /// Get commands
-    pub fn commands(&self) -> &[Command] {
-        &self.commands
+    /// Queue a custom world mutation
+    pub fn add<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut World) -> Result<()> + Send + 'static,
+    {
+        self.commands.push(Command::Custom(Box::new(f)));
+    }
+
+    /// Queue add component command
+    pub fn add_component<T: Component>(&mut self, entity: EntityId, component: T) {
+        self.add(move |world| world.add_component(entity, component));
+    }
+
+    /// Queue remove component command
+    pub fn remove_component<T: Component>(&mut self, entity: EntityId) {
+        self.add(move |world| world.remove_component::<T>(entity).map(|_| ()));
+    }
+
+    /// Apply all commands to the world and clear the buffer
+    pub fn apply(&mut self, world: &mut World) -> Result<()> {
+        for command in self.commands.drain(..) {
+            match command {
+                Command::Spawn(f) => {
+                    f(world)?;
+                }
+                Command::Despawn(entity) => {
+                    world.despawn(entity)?;
+                }
+                Command::Custom(f) => {
+                    f(world)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Check if empty
@@ -84,31 +128,6 @@ impl CommandBuffer {
     /// Clear buffer
     pub fn clear(&mut self) {
         self.commands.clear();
-    }
-
-    /// Drain commands
-    pub fn drain(&mut self) -> std::vec::Drain<'_, Command> {
-        self.commands.drain(..)
-    }
-
-    /// Iterate commands
-    pub fn iter(&self) -> std::slice::Iter<'_, Command> {
-        self.commands.iter()
-    }
-}
-
-impl Default for CommandBuffer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl IntoIterator for CommandBuffer {
-    type Item = Command;
-    type IntoIter = std::vec::IntoIter<Command>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.commands.into_iter()
     }
 }
 

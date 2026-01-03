@@ -1,12 +1,11 @@
 use archetype_ecs::{Executor, Schedule, System, SystemAccess, World};
 use criterion::{criterion_group, criterion_main, Criterion};
-use std::any::TypeId;
 
 struct HeavySystem {
     #[allow(dead_code)]
     id: usize,
-    reads: Vec<TypeId>,
-    writes: Vec<TypeId>,
+    reads: Vec<archetype_ecs::system::ComponentId>,
+    writes: Vec<archetype_ecs::system::ComponentId>,
 }
 
 impl System for HeavySystem {
@@ -14,14 +13,18 @@ impl System for HeavySystem {
         "HeavySystem"
     }
 
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         SystemAccess {
             reads: self.reads.clone(),
             writes: self.writes.clone(),
         }
     }
 
-    fn run(&mut self, _world: &mut World) -> archetype_ecs::Result<()> {
+    fn run(
+        &mut self,
+        _world: &mut World,
+        _commands: &mut archetype_ecs::command::CommandBuffer,
+    ) -> archetype_ecs::Result<()> {
         // Simulate work
         let mut _x = 0;
         for i in 0..1_000_000 {

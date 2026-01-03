@@ -26,7 +26,9 @@ fn test_hierarchy_single_parent_child() {
 
     // Run hierarchy system
     let mut system = HierarchyUpdateSystem::new();
-    system.run(&mut world).unwrap();
+    let mut commands = CommandBuffer::new();
+    system.run(&mut world, &mut commands).unwrap();
+    commands.apply(&mut world).unwrap();
 
     // Verify child's global transform = parent_global * child_local
     let child_global = world.get_component::<GlobalTransform>(child).unwrap();
@@ -63,7 +65,9 @@ fn test_hierarchy_multiple_children() {
 
     // Run hierarchy system
     let mut system = HierarchyUpdateSystem::new();
-    system.run(&mut world).unwrap();
+    let mut commands = CommandBuffer::new();
+    system.run(&mut world, &mut commands).unwrap();
+    commands.apply(&mut world).unwrap();
 
     // Verify each child's global transform
     for (i, &child_id) in child_ids.iter().enumerate() {
@@ -109,7 +113,9 @@ fn test_hierarchy_deep_nesting() {
 
     // Run hierarchy system
     let mut system = HierarchyUpdateSystem::new();
-    system.run(&mut world).unwrap();
+    let mut commands = CommandBuffer::new();
+    system.run(&mut world, &mut commands).unwrap();
+    commands.apply(&mut world).unwrap();
 
     // Verify deepest child is at (10, 0, 0)
     let deepest = entities[9];
@@ -146,7 +152,9 @@ fn test_hierarchy_reparenting() {
 
     // Run hierarchy system
     let mut system = HierarchyUpdateSystem::new();
-    system.run(&mut world).unwrap();
+    let mut commands = CommandBuffer::new();
+    system.run(&mut world, &mut commands).unwrap();
+    commands.apply(&mut world).unwrap();
 
     // Verify child is at (15, 0, 0)
     let global = world.get_component::<GlobalTransform>(child).unwrap();
@@ -166,7 +174,9 @@ fn test_hierarchy_reparenting() {
     world.add_component(parent_b, children_b).unwrap();
 
     // Run hierarchy system again
-    system.run(&mut world).unwrap();
+    let mut commands = CommandBuffer::new();
+    system.run(&mut world, &mut commands).unwrap();
+    commands.apply(&mut world).unwrap();
 
     // Verify child is now at (25, 0, 0)
     let global = world.get_component::<GlobalTransform>(child).unwrap();
@@ -195,7 +205,9 @@ fn test_hierarchy_performance_1000_entities() {
     // Benchmark update
     let start = std::time::Instant::now();
     let mut system = HierarchyUpdateSystem::new();
-    system.run(&mut world).unwrap();
+    let mut commands = CommandBuffer::new();
+    system.run(&mut world, &mut commands).unwrap();
+    commands.apply(&mut world).unwrap();
     let duration = start.elapsed();
 
     // Should complete in <10ms
@@ -217,7 +229,9 @@ fn test_hierarchy_no_parent() {
 
     // Run hierarchy system
     let mut system = HierarchyUpdateSystem::new();
-    system.run(&mut world).unwrap();
+    let mut commands = CommandBuffer::new();
+    system.run(&mut world, &mut commands).unwrap();
+    commands.apply(&mut world).unwrap();
 
     // Verify global transform equals local transform (no parent)
     let global = world.get_component::<GlobalTransform>(entity).unwrap();

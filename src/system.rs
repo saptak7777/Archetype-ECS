@@ -1,18 +1,34 @@
 //! System trait and access metadata
 
 use crate::error::Result;
-use crate::World;
+use crate::world::{UnsafeWorldCell, World};
 use std::any::TypeId;
 
 /// System ID
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SystemId(pub u32); // Made public
 
+/// Component ID wrapper
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ComponentId(pub TypeId);
+
+impl ComponentId {
+    pub fn of<T: 'static>() -> Self {
+        Self(TypeId::of::<T>())
+    }
+}
+
+impl From<TypeId> for ComponentId {
+    fn from(id: TypeId) -> Self {
+        Self(id)
+    }
+}
+
 /// System access metadata
 #[derive(Debug, Clone)]
 pub struct SystemAccess {
-    pub reads: Vec<TypeId>,
-    pub writes: Vec<TypeId>,
+    pub reads: Vec<ComponentId>,
+    pub writes: Vec<ComponentId>,
 }
 
 impl Default for SystemAccess {
@@ -37,13 +53,13 @@ impl SystemAccess {
 
     /// Declare read access to a component
     pub fn read<T: 'static>(mut self) -> Self {
-        self.reads.push(TypeId::of::<T>());
+        self.reads.push(ComponentId::of::<T>());
         self
     }
 
     /// Declare write access to a component
     pub fn write<T: 'static>(mut self) -> Self {
-        self.writes.push(TypeId::of::<T>());
+        self.writes.push(ComponentId::of::<T>());
         self
     }
 
@@ -103,13 +119,13 @@ impl SystemAccess {
 
     /// Declare read access to a resource
     pub fn resource<R: 'static>(mut self) -> Self {
-        self.reads.push(TypeId::of::<R>());
+        self.reads.push(ComponentId::of::<R>());
         self
     }
 
     /// Declare write access to a resource
     pub fn resource_mut<R: 'static>(mut self) -> Self {
-        self.writes.push(TypeId::of::<R>());
+        self.writes.push(ComponentId::of::<R>());
         self
     }
 }
@@ -117,13 +133,32 @@ impl SystemAccess {
 /// System trait
 pub trait System: Send + Sync {
     /// Get system access metadata
-    fn access(&self) -> SystemAccess;
+    fn accesses(&self) -> SystemAccess;
 
     /// Get system name
     fn name(&self) -> &'static str;
 
-    /// Run system logic against the world
-    fn run(&mut self, world: &mut World) -> Result<()>;
+    /// Run system with world access
+    fn run(
+        &mut self,
+        world: &mut World,
+        commands: &mut crate::command::CommandBuffer,
+    ) -> Result<()>;
+
+    /// Run system in parallel using UnsafeWorldCell
+    ///
+    /// # Safety
+    /// Caller must ensure disjoint access to components as declared in `accesses()`.
+    unsafe fn run_parallel(
+        &mut self,
+        world: UnsafeWorldCell,
+        commands: &mut crate::command::CommandBuffer,
+    ) -> Result<()> {
+        // Default implementation: cast to &mut World
+        // This is safe IF the scheduler has guaranteed disjointness.
+        let world_mut = &mut *world.world_ptr();
+        self.run(world_mut, commands)
+    }
 }
 
 /// Boxed system
@@ -136,10 +171,10 @@ mod tests {
     #[test]
     fn test_system_access_conflicts() {
         let mut access1 = SystemAccess::empty();
-        access1.writes.push(TypeId::of::<i32>());
+        access1.writes.push(ComponentId::of::<i32>());
 
         let mut access2 = SystemAccess::empty();
-        access2.writes.push(TypeId::of::<i32>());
+        access2.writes.push(ComponentId::of::<i32>());
 
         assert!(access1.conflicts_with(&access2));
     }
@@ -147,10 +182,10 @@ mod tests {
     #[test]
     fn test_system_access_no_conflicts() {
         let mut access1 = SystemAccess::empty();
-        access1.reads.push(TypeId::of::<i32>());
+        access1.reads.push(ComponentId::of::<i32>());
 
         let mut access2 = SystemAccess::empty();
-        access2.reads.push(TypeId::of::<i32>());
+        access2.reads.push(ComponentId::of::<i32>());
 
         assert!(!access1.conflicts_with(&access2));
     }
@@ -159,7 +194,7 @@ mod tests {
     struct DummySystem;
 
     impl System for DummySystem {
-        fn access(&self) -> SystemAccess {
+        fn accesses(&self) -> SystemAccess {
             SystemAccess::empty()
         }
 
@@ -167,7 +202,11 @@ mod tests {
             "dummy_system"
         }
 
-        fn run(&mut self, world: &mut World) -> Result<()> {
+        fn run(
+            &mut self,
+            world: &mut World,
+            _commands: &mut crate::command::CommandBuffer,
+        ) -> Result<()> {
             // Spawn and immediately despawn to ensure mutable access works
             let entity = world.spawn_entity((42i32,));
             world.despawn(entity).ok();
@@ -178,7 +217,10 @@ mod tests {
     #[test]
     fn test_system_run_signature() {
         let mut world = World::new();
+        let mut commands = crate::command::CommandBuffer::new();
         let mut system = DummySystem;
-        system.run(&mut world).expect("system should run");
+        system
+            .run(&mut world, &mut commands)
+            .expect("system should run");
     }
 }

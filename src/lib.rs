@@ -15,9 +15,22 @@
 //! Archetype ECS - High-performance Entity Component System
 //!
 //! Production-ready ECS with parallel scheduler and advanced features.
+//!
+//! ## Profiling
+//!
+//! Archetype ECS has built-in support for the `tracing` ecosystem.
+//! To enable profiling, add the `profiling` feature to your `Cargo.toml`:
+//!
+//! ```toml
+//! [dependencies]
+//! archetype_ecs = { version = "1.1", features = ["profiling"] }
+//! ```
+//!
+//! See `examples/16_profiling_basics.rs` for a complete setup guide.
 
 pub mod app;
 pub mod archetype;
+pub mod bitset;
 pub mod command;
 pub mod component;
 pub mod debug;
@@ -70,6 +83,7 @@ pub use plugin::*;
 pub use query::*;
 pub use reflection::*;
 pub use schedule::*;
+pub use serialization::*;
 pub use system::*;
 pub use transform::*;
 pub use world::*;

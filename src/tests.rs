@@ -21,8 +21,8 @@ mod tests {
     use crate::{
         CommandBuffer, Executor, Query, QueryState, Schedule, System, SystemAccess, World,
     };
-    use crate::{EcsError, Result, Event};
-    use std::any::{TypeId, Any};
+    use crate::{EcsError, Event, Result};
+    use std::any::{Any, TypeId};
 
     #[test]
     fn test_basic_spawn_despawn() -> Result<()> {
@@ -448,9 +448,11 @@ mod tests {
     }
 
     impl System for LoggingSystem {
-        fn access(&self) -> SystemAccess {
+        fn accesses(&self) -> SystemAccess {
             let mut access = SystemAccess::empty();
-            access.writes.push(TypeId::of::<LogComponent>());
+            access
+                .writes
+                .push(crate::system::ComponentId::of::<LogComponent>());
             access
         }
 
@@ -458,7 +460,11 @@ mod tests {
             self.name
         }
 
-        fn run(&mut self, world: &mut World) -> Result<()> {
+        fn run(
+            &mut self,
+            world: &mut World,
+            _commands: &mut crate::command::CommandBuffer,
+        ) -> Result<()> {
             let mut query = world.query_mut::<&mut LogComponent>();
             for log in query.iter() {
                 log.entries.push(self.name);
@@ -470,7 +476,7 @@ mod tests {
     struct FailingSystem;
 
     impl System for FailingSystem {
-        fn access(&self) -> SystemAccess {
+        fn accesses(&self) -> SystemAccess {
             SystemAccess::empty()
         }
 
@@ -478,7 +484,11 @@ mod tests {
             "failing_system"
         }
 
-        fn run(&mut self, _world: &mut World) -> Result<()> {
+        fn run(
+            &mut self,
+            _world: &mut World,
+            _commands: &mut crate::command::CommandBuffer,
+        ) -> Result<()> {
             Err(EcsError::ScheduleError("intentional failure".into()))
         }
     }
@@ -504,7 +514,10 @@ mod tests {
             .expect("log component exists");
         assert_eq!(log.entries, vec!["first", "second"]);
 
-        let profile = executor.last_profile.as_ref().expect("profiling data available");
+        let profile = executor
+            .last_profile
+            .as_ref()
+            .expect("profiling data available");
         assert_eq!(profile.system_timings.len(), 2);
         assert_eq!(profile.system_timings[0].name, "first");
     }
@@ -534,16 +547,16 @@ mod tests {
     #[test]
     fn test_get_or_insert_with() {
         let mut world = World::new();
-        
+
         #[derive(Debug, PartialEq)]
         struct Time {
             delta: f32,
         }
-        
+
         // First call inserts
         let time1 = world.get_or_insert_with(|| Time { delta: 0.016 });
         assert_eq!(time1.delta, 0.016);
-        
+
         // Second call returns existing (use a new scope to end the first borrow)
         {
             let time2 = world.get_or_insert_with(|| Time { delta: 0.999 });
@@ -554,15 +567,15 @@ mod tests {
     #[test]
     fn test_init_resource() {
         let mut world = World::new();
-        
+
         #[derive(Debug, PartialEq)]
         struct Config {
             value: u32,
         }
-        
+
         // First insert succeeds
         world.init_resource(Config { value: 42 }).unwrap();
-        
+
         // Second insert fails
         let result = world.init_resource(Config { value: 99 });
         assert!(matches!(result, Err(EcsError::ResourceAlreadyExists(_))));
@@ -571,25 +584,36 @@ mod tests {
     #[test]
     fn test_spawn_batch_updates_component_tracker() {
         let mut world = World::new();
-        
+
         // Use simple tuple components directly
         // Batch spawn entities
-        let entities = world.spawn_batch(vec![
-            ((0.0f32, 0.0f32, 0.0f32), (1.0f32, 0.0f32, 0.0f32)),
-            ((1.0f32, 0.0f32, 0.0f32), (0.0f32, 1.0f32, 0.0f32)),
-        ]).unwrap();
-        
+        let entities = world
+            .spawn_batch(vec![
+                ((0.0f32, 0.0f32, 0.0f32), (1.0f32, 0.0f32, 0.0f32)),
+                ((1.0f32, 0.0f32, 0.0f32), (0.0f32, 1.0f32, 0.0f32)),
+            ])
+            .unwrap();
+
         // Verify component tracker has entries
         for entity in entities {
             let tracked = world.component_tracker.get(&entity);
             assert!(tracked.is_some(), "Entity should be in component tracker");
-            
+
             // Debug: print what we actually track
             let tracked_set = tracked.unwrap();
-            println!("Entity {:?} tracks {} components: {:?}", entity, tracked_set.len(), tracked_set);
-            
+            println!(
+                "Entity {:?} tracks {} components: {:?}",
+                entity,
+                tracked_set.len(),
+                tracked_set
+            );
+
             // Both tuple types are the same, so we only track 1 component type
-            assert_eq!(tracked_set.len(), 1, "Should track 1 component type (both tuples are same type)");
+            assert_eq!(
+                tracked_set.len(),
+                1,
+                "Should track 1 component type (both tuples are same type)"
+            );
         }
     }
 
@@ -607,7 +631,7 @@ mod tests {
         schedule.add_stage("Extract").unwrap();
         schedule.add_stage("Prepare").unwrap();
         schedule.add_stage_dependency("Prepare", "Extract").unwrap();
-        
+
         assert_eq!(schedule.stages[1].depends_on, vec!["Extract"]);
     }
 
@@ -618,7 +642,7 @@ mod tests {
         schedule.add_stage("B").unwrap();
         schedule.add_stage_dependency("A", "B").unwrap();
         schedule.add_stage_dependency("B", "A").unwrap();
-        
+
         assert!(schedule.validate_stages().is_err());
     }
 
@@ -626,15 +650,27 @@ mod tests {
     fn test_add_system_to_stage() {
         let mut schedule = Schedule::new();
         schedule.add_stage("Update").unwrap();
-        
+
         struct TestSystem;
         impl System for TestSystem {
-            fn name(&self) -> &'static str { "test" }
-            fn access(&self) -> SystemAccess { SystemAccess::new() }
-            fn run(&mut self, _world: &mut World) -> Result<()> { Ok(()) }
+            fn name(&self) -> &'static str {
+                "test"
+            }
+            fn accesses(&self) -> SystemAccess {
+                SystemAccess::new()
+            }
+            fn run(
+                &mut self,
+                _world: &mut World,
+                _commands: &mut crate::command::CommandBuffer,
+            ) -> Result<()> {
+                Ok(())
+            }
         }
-        
-        schedule.add_system_to_stage("Update", Box::new(TestSystem)).unwrap();
+
+        schedule
+            .add_system_to_stage("Update", Box::new(TestSystem))
+            .unwrap();
         assert_eq!(schedule.stages[0].systems.len(), 1);
         assert_eq!(schedule.systems.len(), 1);
     }
@@ -647,8 +683,11 @@ mod tests {
                 name: String,
             }
         }
-        
-        let event = TestEvent { value: 42, name: "test".to_string() };
+
+        let event = TestEvent {
+            value: 42,
+            name: "test".to_string(),
+        };
         assert_eq!(event.event_name(), "TestEvent");
         assert_eq!(event.event_type_id(), std::any::TypeId::of::<TestEvent>());
     }
@@ -658,7 +697,7 @@ mod tests {
         crate::define_event! {
             pub struct UnitEvent;
         }
-        
+
         let event = UnitEvent;
         assert_eq!(event.event_name(), "UnitEvent");
     }
@@ -671,7 +710,7 @@ mod tests {
                 data: i32,
             }
         }
-        
+
         let event = DocumentedEvent { data: 100 };
         assert_eq!(event.event_name(), "DocumentedEvent");
     }
@@ -679,22 +718,26 @@ mod tests {
     #[test]
     fn test_simd_chunks() {
         use crate::QueryState;
-        
+
         #[derive(Debug, Copy, Clone)]
         struct Position {
             x: f32,
             y: f32,
             z: f32,
         }
-        
+
         let mut world = World::new();
         for _ in 0..100 {
-            world.spawn_entity((Position { x: 0.0, y: 0.0, z: 0.0 },));
+            world.spawn_entity((Position {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },));
         }
-        
+
         let mut query = QueryState::<&mut Position>::new(&world);
         let chunks = query.iter_simd_chunks::<Position>(&mut world);
-        
+
         assert!(!chunks.is_empty());
         println!("Found {} chunks", chunks.len());
     }

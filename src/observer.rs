@@ -37,6 +37,65 @@ pub trait Observer: Send + Sync {
     }
 }
 
+/// Metrics for observer performance tracking
+#[derive(Debug, Clone, Default)]
+pub struct ObserverMetrics {
+    /// Total number of events processed
+    pub total_events: u64,
+
+    /// Total time spent in observers (microseconds)
+    pub total_time_us: u64,
+
+    /// Events processed per observer type
+    pub events_by_type: std::collections::HashMap<String, u64>,
+
+    /// Average time per event (microseconds)
+    pub avg_time_us: f64,
+
+    /// Peak time for single event (microseconds)
+    pub peak_time_us: u64,
+
+    /// Last reset time
+    pub last_reset: Option<std::time::Instant>,
+}
+
+impl ObserverMetrics {
+    /// Reset metrics
+    pub fn reset(&mut self) {
+        self.total_events = 0;
+        self.total_time_us = 0;
+        self.events_by_type.clear();
+        self.avg_time_us = 0.0;
+        self.peak_time_us = 0;
+        self.last_reset = Some(std::time::Instant::now());
+    }
+
+    /// Record an event processing
+    pub fn record_event(&mut self, event_type: &str, duration_us: u64) {
+        self.total_events += 1;
+        self.total_time_us += duration_us;
+        self.avg_time_us = self.total_time_us as f64 / self.total_events as f64;
+        self.peak_time_us = self.peak_time_us.max(duration_us);
+
+        *self
+            .events_by_type
+            .entry(event_type.to_string())
+            .or_insert(0) += 1;
+    }
+
+    /// Print summary to stdout
+    pub fn print_summary(&self) {
+        println!("Observer Metrics:");
+        println!("  Total events: {}", self.total_events);
+        println!("  Average time: {:.2} μs", self.avg_time_us);
+        println!("  Peak time: {} μs", self.peak_time_us);
+        println!("  Events by type:");
+        for (event_type, count) in &self.events_by_type {
+            println!("    - {event_type}: {count}");
+        }
+    }
+}
+
 /// Registry that manages all observers
 pub struct ObserverRegistry {
     pub(crate) observers: Vec<Box<dyn Observer>>,
@@ -54,17 +113,17 @@ impl ObserverRegistry {
     pub fn register(&mut self, mut observer: Box<dyn Observer>, world: &mut World) -> Result<()> {
         // Call before registration
         observer.on_before_register(world)?;
-        
+
         // Store observer
         let index = self.observers.len();
         self.observers.push(observer);
-        
+
         // Call after registration
         if let Some(obs) = self.observers.last_mut() {
             obs.on_registered(world)?;
             obs.on_after_register(world, index)?;
         }
-        
+
         Ok(())
     }
 
@@ -245,10 +304,10 @@ mod tests {
 
         let mut world = World::new();
         registry.register(observer, &mut world).unwrap();
-        
+
         // Verify all callbacks were called in correct order
         assert_eq!(registry.observer_count(), 1);
-        
+
         // We can't easily verify the internal state since the observer is now in the registry
         // But we can verify the registry has one observer
     }

@@ -30,24 +30,21 @@ fn main() {
     println!("Creating entities...");
 
     // Spawn entity with Position + Velocity
-    let entity1 = world
-        .spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.5 }));
+    let entity1 = world.spawn_entity((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.5 }));
 
     println!("Spawned entity {:?}", entity1);
 
     // Spawn entity with all three components
-    let entity2 = world
-        .spawn((
-            Position { x: 10.0, y: 20.0 },
-            Velocity { x: -1.0, y: 2.0 },
-            Health(100),
-        ));
+    let entity2 = world.spawn_entity((
+        Position { x: 10.0, y: 20.0 },
+        Velocity { x: -1.0, y: 2.0 },
+        Health(100),
+    ));
 
     println!("Spawned entity {:?}", entity2);
 
     // Spawn entity with only Position
-    let entity3 = world
-        .spawn((Position { x: 5.0, y: 5.0 },));
+    let entity3 = world.spawn_entity((Position { x: 5.0, y: 5.0 },));
 
     println!("Spawned entity {:?}", entity3);
 

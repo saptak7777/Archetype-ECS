@@ -21,6 +21,14 @@ new_key_type! {
     pub struct EntityId;
 }
 
+impl std::fmt::Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use slotmap::Key;
+        let ffi = self.data().as_ffi();
+        write!(f, "E{}v{}", ffi & 0xFFFFFFFF, ffi >> 32)
+    }
+}
+
 /// Entity location in archetype (archetype_id, row)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntityLocation {

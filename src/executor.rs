@@ -134,40 +134,41 @@ impl<'s> Executor<'s> {
     /// Execute one frame
     pub fn execute_frame(&mut self, world: &mut World) -> Result<()> {
         world.increment_tick();
-        
+
         self.schedule.ensure_built()?;
-        
+
         // Check if we have named stages with dependencies (not default stages)
         let has_named_stages = self.schedule.stages.iter().any(|s| s.name != "default");
-        
+
         if has_named_stages {
-            // Validate stage dependencies if using named stages
-            self.schedule.validate_stages()?;
-            
-            // Get topologically sorted stages
-            let sorted_stages = self.topological_sort_stages()?;
-            
             let frame_start = Instant::now();
             let mut system_timings = Vec::with_capacity(self.schedule.systems.len());
+            let mut commands = CommandBuffer::new();
+            let parallel_plan = self.schedule.parallel_plan.clone();
 
-            for stage in sorted_stages {
-                for system_id in stage.systems {
-                    let system = self
-                        .schedule
-                        .system_mut_by_id(system_id)
-                        .ok_or(EcsError::SystemNotFound)?;
-                    let system_name = system.name();
+            for stage_plan in parallel_plan {
+                for group in stage_plan.parallel_groups {
+                    for &system_id_idx in &group.system_indices {
+                        let system_id = SystemId(system_id_idx as u32);
+                        let system = self
+                            .schedule
+                            .system_mut_by_id(system_id)
+                            .ok_or(EcsError::SystemNotFound)?;
+                        let system_name = system.name();
 
-                    let start = Instant::now();
-                    system.run(world)?;
-                    let duration = start.elapsed();
+                        let start = Instant::now();
+                        system.run(world, &mut commands)?;
+                        let duration = start.elapsed();
 
-                    self.profiler.record_execution(system_id, duration);
-                    system_timings.push(SystemTiming {
-                        name: system_name.to_string(),
-                        duration,
-                    });
+                        self.profiler.record_execution(system_id, duration);
+                        system_timings.push(SystemTiming {
+                            name: system_name.to_string(),
+                            duration,
+                        });
+                    }
                 }
+                // Flush commands after each stage
+                commands.apply(world)?;
             }
 
             let frame_duration = frame_start.elapsed();
@@ -185,6 +186,7 @@ impl<'s> Executor<'s> {
                 .collect();
             let frame_start = Instant::now();
             let mut system_timings = Vec::with_capacity(self.schedule.systems.len());
+            let mut commands = CommandBuffer::new();
 
             for stage in stage_plan {
                 for system_id in stage {
@@ -195,7 +197,7 @@ impl<'s> Executor<'s> {
                     let system_name = system.name();
 
                     let start = Instant::now();
-                    system.run(world)?;
+                    system.run(world, &mut commands)?;
                     let duration = start.elapsed();
 
                     self.profiler.record_execution(system_id, duration);
@@ -204,6 +206,7 @@ impl<'s> Executor<'s> {
                         duration,
                     });
                 }
+                commands.apply(world)?;
             }
 
             let frame_duration = frame_start.elapsed();
@@ -216,95 +219,59 @@ impl<'s> Executor<'s> {
         Ok(())
     }
 
-    /// Topologically sort stages based on dependencies
-    fn topological_sort_stages(&self) -> Result<Vec<crate::schedule::Stage>> {
-        let mut sorted = Vec::new();
-        let mut temp = std::collections::HashSet::new();
-        let mut visited = std::collections::HashSet::new();
-        
-        fn visit(
-            stage: &crate::schedule::Stage,
-            all_stages: &[crate::schedule::Stage],
-            sorted: &mut Vec<crate::schedule::Stage>,
-            temp: &mut std::collections::HashSet<String>,
-            visited: &mut std::collections::HashSet<String>,
-        ) -> Result<()> {
-            if temp.contains(&stage.name) {
-                return Err(EcsError::ScheduleError(format!("Circular dependency in stage '{}'", stage.name)));
-            }
-            if visited.contains(&stage.name) {
-                return Ok(());
-            }
-            
-            temp.insert(stage.name.clone());
-            
-            for dep_name in &stage.depends_on {
-                if let Some(dep_stage) = all_stages.iter().find(|s| s.name.as_str() == dep_name) {
-                    visit(dep_stage, all_stages, sorted, temp, visited)?;
-                }
-            }
-            
-            temp.remove(&stage.name);
-            visited.insert(stage.name.clone());
-            sorted.push(stage.clone());
-            Ok(())
-        }
-        
-        for stage in &self.schedule.stages {
-            visit(stage, &self.schedule.stages, &mut sorted, &mut temp, &mut visited)?;
-        }
-        
-        Ok(sorted)
-    }
-
     /// Execute systems in parallel where possible
     ///
     /// Uses the dependency graph to determine which systems can run concurrently.
     /// See `ParallelExecutor::execute_stage` for detailed safety documentation.
     pub fn execute_frame_parallel(&mut self, world: &mut World) -> Result<()> {
         world.increment_tick();
-        use crate::dependency::DependencyGraph;
-        use crate::system::System;
-        use rayon::prelude::*;
-        // Get system accesses
-        let accesses = self.schedule.get_accesses();
-        let graph = DependencyGraph::new(accesses);
+        self.schedule.ensure_built()?;
 
-        // Clone stages to avoid borrowing issues
-        let stages = graph.stages().to_vec();
+        let systems_ptr = self.schedule.systems.as_mut_ptr() as usize;
+        let systems_len = self.schedule.systems.len();
+        let parallel_plan = self.schedule.parallel_plan.clone();
 
-        for stage in stages {
-            // Parallel execution logic inline (similar to ParallelExecutor)
-            let systems_ptr = self.schedule.systems.as_mut_ptr() as usize;
-            let systems_len = self.schedule.systems.len();
-            let world_ptr = world as *mut World as usize;
+        for stage_plan in parallel_plan {
+            #[cfg(feature = "profiling")]
+            let _stage_span = info_span!("stage", name = %stage_plan.name).entered();
 
-            let results: Vec<Result<()>> = stage
-                .system_indices
-                .par_iter()
-                .map(move |&sys_idx| {
-                    if sys_idx >= systems_len {
-                        return Err(EcsError::SystemNotFound);
-                    }
+            for group in stage_plan.parallel_groups {
+                use rayon::prelude::*;
 
-                    // SAFETY: See ParallelExecutor::execute_stage for full safety documentation.
-                    // In summary:
-                    // 1. sys_idx is guaranteed valid by dependency graph
-                    // 2. Systems in same stage have non-conflicting access
-                    // 3. Each thread accesses a unique system index
-                    // 4. World access is disjoint (different components/archetypes)
-                    let system =
-                        unsafe { &mut *(systems_ptr as *mut Box<dyn System>).add(sys_idx) };
-                    let world = unsafe { &mut *(world_ptr as *mut World) };
-                    system.run(world)
-                })
-                .collect();
+                // SAFETY: We use UnsafeWorldCell to provide disjoint access to threads.
+                // The scheduler (via DependencyGraph) guarantees that systems in the same
+                // group do not have conflicting component accesses.
+                let world_cell = unsafe { world.as_unsafe_world_cell() };
 
-            for result in results {
-                result?;
+                let results: Vec<(Result<()>, CommandBuffer)> = group
+                    .system_indices
+                    .par_iter()
+                    .map(move |&sys_idx| {
+                        let mut commands = CommandBuffer::new();
+                        if sys_idx >= systems_len {
+                            return (Err(EcsError::SystemNotFound), commands);
+                        }
+
+                        // SAFETY:
+                        // 1. sys_idx is valid.
+                        // 2. Systems in the same group have been proven non-conflicting by the scheduler.
+                        // 3. Each thread handles a unique sys_idx.
+                        let system =
+                            unsafe { &mut *(systems_ptr as *mut Box<dyn System>).add(sys_idx) };
+                        let res = unsafe { system.run_parallel(world_cell, &mut commands) };
+                        (res, commands)
+                    })
+                    .collect();
+
+                // Check for errors and collect commands
+                for (result, mut commands) in results {
+                    result?;
+                    commands.apply(world)?;
+                }
+
+                // Sync point after each parallel group
+                self.barrier(world)?;
             }
-
-            self.barrier(world)?;
         }
 
         Ok(())
@@ -322,10 +289,12 @@ impl<'s> Executor<'s> {
 
     /// Execute systems and process observer events
     pub fn execute_frame_with_events(&mut self, world: &mut World) -> Result<()> {
+        let mut commands = CommandBuffer::new();
         // Execute systems
         for system in &mut self.schedule.systems {
-            system.run(world)?;
+            system.run(world, &mut commands)?;
         }
+        commands.apply(world)?;
 
         // Process queued events
         world.process_events()?;
@@ -338,10 +307,12 @@ impl<'s> Executor<'s> {
         #[cfg(feature = "profiling")]
         let _span = info_span!("execute_frame_full");
 
+        let mut commands = CommandBuffer::new();
         // Execute systems
         for system in &mut self.schedule.systems {
-            system.run(world)?;
+            system.run(world, &mut commands)?;
         }
+        commands.apply(world)?;
 
         // Process all events
         world.process_events()?;
@@ -353,14 +324,16 @@ impl<'s> Executor<'s> {
     pub fn execute_with_hierarchy(&mut self, world: &mut World) -> Result<()> {
         use crate::hierarchy_system::HierarchyUpdateSystem;
 
+        let mut commands = CommandBuffer::new();
         // Run hierarchy update first (transforms)
         let mut hierarchy_system = HierarchyUpdateSystem::new();
-        hierarchy_system.run(world)?;
+        hierarchy_system.run(world, &mut commands)?;
 
         // Then run user systems
         for system in &mut self.schedule.systems {
-            system.run(world)?;
+            system.run(world, &mut commands)?;
         }
+        commands.apply(world)?;
 
         // Process events if Phase 3 is enabled
         world.process_events()?;
@@ -372,14 +345,16 @@ impl<'s> Executor<'s> {
     pub fn execute_full(&mut self, world: &mut World) -> Result<()> {
         use crate::hierarchy_system::HierarchyUpdateSystem;
 
+        let mut commands = CommandBuffer::new();
         // Execute hierarchy system
         let mut hierarchy_system = HierarchyUpdateSystem::new();
-        hierarchy_system.run(world)?;
+        hierarchy_system.run(world, &mut commands)?;
 
         // Execute user systems
         for system in &mut self.schedule.systems {
-            system.run(world)?;
+            system.run(world, &mut commands)?;
         }
+        commands.apply(world)?;
 
         // Process events
         world.process_events()?;
@@ -389,10 +364,12 @@ impl<'s> Executor<'s> {
 
     /// Execute with global event processing (Phase 6)
     pub fn execute_with_global_events(&mut self, world: &mut World) -> Result<()> {
+        let mut commands = CommandBuffer::new();
         // Execute systems
         for system in &mut self.schedule.systems {
-            system.run(world)?;
+            system.run(world, &mut commands)?;
         }
+        commands.apply(world)?;
 
         // Process global events published by systems
         world.process_global_events()?;
@@ -404,14 +381,16 @@ impl<'s> Executor<'s> {
     pub fn execute_complete_frame(&mut self, world: &mut World) -> Result<()> {
         use crate::hierarchy_system::HierarchyUpdateSystem;
 
+        let mut commands = CommandBuffer::new();
         // 1. Update hierarchy transforms
         let mut hierarchy_system = HierarchyUpdateSystem::new();
-        hierarchy_system.run(world)?;
+        hierarchy_system.run(world, &mut commands)?;
 
         // 2. Execute systems
         for system in &mut self.schedule.systems {
-            system.run(world)?;
+            system.run(world, &mut commands)?;
         }
+        commands.apply(world)?;
 
         // 3. Process global events (Phase 6)
         world.process_global_events()?;
@@ -452,91 +431,122 @@ impl<'s> Executor<'s> {
     /// Get detailed profiling stats
     pub fn profiling_stats(&self, world: &World) -> ProfilingStats {
         let mut stats = ProfilingStats::default();
-        
+
         if let Some(profile) = &self.last_profile {
             stats.total_frame_time = profile.total_frame_time;
             stats.system_timings = profile.system_timings.clone();
-            
+
             // Calculate per-entity timing
             stats.entity_count = world.entity_count() as usize;
             if stats.entity_count > 0 {
-                stats.time_per_entity = stats.total_frame_time.as_secs_f32() / stats.entity_count as f32;
+                stats.time_per_entity =
+                    stats.total_frame_time.as_secs_f32() / stats.entity_count as f32;
             }
-            
+
             // Calculate systems per second
             if !stats.total_frame_time.is_zero() {
-                stats.systems_per_second = stats.system_timings.len() as f32 / stats.total_frame_time.as_secs_f32();
+                stats.systems_per_second =
+                    stats.system_timings.len() as f32 / stats.total_frame_time.as_secs_f32();
             }
-            
+
             // Get memory usage
             stats.memory_usage = world.memory_stats().total_memory;
         }
-        
+
         stats
     }
-    
+
     /// Export profiling data to CSV
     pub fn export_profiling_csv(&self, world: &World, path: &str) -> Result<()> {
         use std::fs::File;
         use std::io::Write;
-        
+
         if let Some(profile) = &self.last_profile {
             let mut file = File::create(path)?;
-            
+
             // Write CSV header
             writeln!(file, "system_name,duration_ms,duration_us,percentage")?;
-            
+
             // Write system timings
             for timing in &profile.system_timings {
                 let duration_ms = timing.duration.as_millis();
                 let duration_us = timing.duration.as_micros();
-                let percentage = (timing.duration.as_secs_f32() / profile.total_frame_time.as_secs_f32()) * 100.0;
-                
-                writeln!(file, "{},{},{},{:.2}", timing.name, duration_ms, duration_us, percentage)?;
+                let percentage = (timing.duration.as_secs_f32()
+                    / profile.total_frame_time.as_secs_f32())
+                    * 100.0;
+
+                writeln!(
+                    file,
+                    "{},{},{},{:.2}",
+                    timing.name, duration_ms, duration_us, percentage
+                )?;
             }
-            
+
             // Write summary
             writeln!(file)?;
-            writeln!(file, "Total Frame Time,{} ms", profile.total_frame_time.as_millis())?;
+            writeln!(
+                file,
+                "Total Frame Time,{} ms",
+                profile.total_frame_time.as_millis()
+            )?;
             writeln!(file, "Entity Count,{}", world.entity_count())?;
-            writeln!(file, "Time Per Entity,{:.6} ms", 
-                (profile.total_frame_time.as_secs_f32() / world.entity_count() as f32) * 1000.0)?;
-            writeln!(file, "Memory Usage,{} bytes", world.memory_stats().total_memory)?;
+            writeln!(
+                file,
+                "Time Per Entity,{:.6} ms",
+                (profile.total_frame_time.as_secs_f32() / world.entity_count() as f32) * 1000.0
+            )?;
+            writeln!(
+                file,
+                "Memory Usage,{} bytes",
+                world.memory_stats().total_memory
+            )?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Print enhanced profiling summary
     pub fn print_profiling_summary(&self, world: &World) {
         let stats = self.profiling_stats(world);
-        
+
         println!("=== Enhanced Profiling Summary ===");
-        println!("Frame Time: {:.3?} ({:.1} FPS)", 
-            stats.total_frame_time, 
-            1.0 / stats.total_frame_time.as_secs_f32());
-        println!("Systems: {} ({:.1} systems/sec)", 
-            stats.system_timings.len(), 
-            stats.systems_per_second);
+        println!(
+            "Frame Time: {:.3?} ({:.1} FPS)",
+            stats.total_frame_time,
+            1.0 / stats.total_frame_time.as_secs_f32()
+        );
+        println!(
+            "Systems: {} ({:.1} systems/sec)",
+            stats.system_timings.len(),
+            stats.systems_per_second
+        );
         println!("Entities: {}", stats.entity_count);
         println!("Time/Entity: {:.6} ms", stats.time_per_entity * 1000.0);
-        println!("Memory: {} bytes ({:.1} MB)", 
-            stats.memory_usage, 
-            stats.memory_usage as f64 / 1_048_576.0);
-        
+        println!(
+            "Memory: {} bytes ({:.1} MB)",
+            stats.memory_usage,
+            stats.memory_usage as f64 / 1_048_576.0
+        );
+
         // Show slowest systems
         if !stats.system_timings.is_empty() {
             println!("\nSlowest Systems:");
             let mut sorted_timings = stats.system_timings.clone();
             sorted_timings.sort_by(|a, b| b.duration.cmp(&a.duration));
-            
+
             for (i, timing) in sorted_timings.iter().take(5).enumerate() {
-                let percentage = (timing.duration.as_secs_f32() / stats.total_frame_time.as_secs_f32()) * 100.0;
-                println!("  {}. {} - {:.3?} ({:.1}%)", 
-                    i + 1, timing.name, timing.duration, percentage);
+                let percentage =
+                    (timing.duration.as_secs_f32() / stats.total_frame_time.as_secs_f32()) * 100.0;
+                println!(
+                    "  {}. {} - {:.3?} ({:.1}%)",
+                    i + 1,
+                    timing.name,
+                    timing.duration,
+                    percentage
+                );
             }
         }
-        
+
         println!("===================================");
     }
 }

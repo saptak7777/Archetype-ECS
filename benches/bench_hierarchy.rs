@@ -7,7 +7,9 @@ fn bench_flat_entities(c: &mut Criterion) {
         b.iter(|| {
             let mut world = World::new();
             for _ in 0..1000 {
-                black_box(world.spawn((LocalTransform::identity(), GlobalTransform::identity())));
+                black_box(
+                    world.spawn_entity((LocalTransform::identity(), GlobalTransform::identity())),
+                );
             }
         })
     });
@@ -17,14 +19,16 @@ fn bench_hierarchy_creation(c: &mut Criterion) {
     c.bench_function("hierarchy_1_root_100_children", |b| {
         b.iter(|| {
             let mut world = World::new();
-            let _root = black_box(world.spawn((
+            let _root = black_box(world.spawn_entity((
                 LocalTransform::identity(),
                 GlobalTransform::identity(),
                 Children::new(),
             )));
 
             for _ in 0..100 {
-                black_box(world.spawn((LocalTransform::identity(), GlobalTransform::identity())));
+                black_box(
+                    world.spawn_entity((LocalTransform::identity(), GlobalTransform::identity())),
+                );
             }
         })
     });
@@ -34,12 +38,13 @@ fn bench_hierarchy_deep_tree(c: &mut Criterion) {
     c.bench_function("hierarchy_deep_20_levels", |b| {
         b.iter(|| {
             let mut world = World::new();
-            let mut _parent =
-                black_box(world.spawn((LocalTransform::identity(), GlobalTransform::identity())));
+            let mut _parent = black_box(
+                world.spawn_entity((LocalTransform::identity(), GlobalTransform::identity())),
+            );
 
             for _ in 0..20 {
                 let child = black_box(
-                    world.spawn((LocalTransform::identity(), GlobalTransform::identity())),
+                    world.spawn_entity((LocalTransform::identity(), GlobalTransform::identity())),
                 );
                 _parent = child;
             }

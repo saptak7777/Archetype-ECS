@@ -216,7 +216,7 @@ impl ParallelExecutor {
     /// Create parallel executor from systems
     pub fn new(systems: Vec<Box<dyn System>>) -> Self {
         // Get system accesses
-        let accesses: Vec<_> = systems.iter().map(|s| s.access()).collect();
+        let accesses: Vec<_> = systems.iter().map(|s| s.accesses()).collect();
 
         // Build dependency graph
         let graph = DependencyGraph::new(accesses);
@@ -309,7 +309,11 @@ impl ParallelExecutor {
                 let system = unsafe { &mut *(systems_ptr as *mut Box<dyn System>).add(sys_idx) };
                 let world = unsafe { &mut *(world_ptr as *mut World) };
 
-                let result = system.run(world);
+                let mut commands = crate::command::CommandBuffer::new();
+                let result = system.run(world, &mut commands);
+                if result.is_ok() {
+                    let _ = commands.apply(world);
+                }
                 let duration = start.elapsed();
 
                 (sys_idx, duration, result)
@@ -390,7 +394,12 @@ impl ParallelExecutor {
                 // 4. The ECS architecture prevents data races through archetype isolation
                 let world = unsafe { &mut *(world_ptr as *mut World) };
 
-                system.run(world)
+                let mut commands = crate::command::CommandBuffer::new();
+                let result = system.run(world, &mut commands);
+                if result.is_ok() {
+                    let _ = commands.apply(world);
+                }
+                result
             })
             .collect();
 
@@ -434,11 +443,15 @@ mod tests {
             self.name
         }
 
-        fn access(&self) -> SystemAccess {
+        fn accesses(&self) -> SystemAccess {
             self.access.clone()
         }
 
-        fn run(&mut self, _world: &mut World) -> Result<()> {
+        fn run(
+            &mut self,
+            _world: &mut World,
+            _commands: &mut crate::command::CommandBuffer,
+        ) -> Result<()> {
             Ok(())
         }
     }

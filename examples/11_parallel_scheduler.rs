@@ -28,10 +28,10 @@ struct Health {
 struct MovementSystem;
 
 impl System for MovementSystem {
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         let mut access = SystemAccess::empty();
-        access.reads.push(std::any::TypeId::of::<Position>());
-        access.writes.push(std::any::TypeId::of::<Velocity>());
+        access.reads.push(ComponentId::of::<Position>());
+        access.writes.push(ComponentId::of::<Velocity>());
         access
     }
 
@@ -39,7 +39,11 @@ impl System for MovementSystem {
         "movement_system"
     }
 
-    fn run(&mut self, _world: &mut World) -> Result<()> {
+    fn run(
+        &mut self,
+        _world: &mut World,
+        _commands: &mut archetype_ecs::command::CommandBuffer,
+    ) -> Result<()> {
         println!("Running movement system");
         // In real implementation: query and update entities
         Ok(())
@@ -49,9 +53,9 @@ impl System for MovementSystem {
 struct HealthSystem;
 
 impl System for HealthSystem {
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         let mut access = SystemAccess::empty();
-        access.reads.push(std::any::TypeId::of::<Health>());
+        access.reads.push(ComponentId::of::<Health>());
         access
     }
 
@@ -59,7 +63,11 @@ impl System for HealthSystem {
         "health_system"
     }
 
-    fn run(&mut self, _world: &mut World) -> Result<()> {
+    fn run(
+        &mut self,
+        _world: &mut World,
+        _commands: &mut archetype_ecs::command::CommandBuffer,
+    ) -> Result<()> {
         println!("Running health system");
         Ok(())
     }
@@ -68,10 +76,10 @@ impl System for HealthSystem {
 struct RenderSystem;
 
 impl System for RenderSystem {
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         let mut access = SystemAccess::empty();
-        access.reads.push(std::any::TypeId::of::<Position>());
-        access.reads.push(std::any::TypeId::of::<Velocity>());
+        access.reads.push(ComponentId::of::<Position>());
+        access.reads.push(ComponentId::of::<Velocity>());
         access
     }
 
@@ -79,7 +87,11 @@ impl System for RenderSystem {
         "render_system"
     }
 
-    fn run(&mut self, _world: &mut World) -> Result<()> {
+    fn run(
+        &mut self,
+        _world: &mut World,
+        _commands: &mut archetype_ecs::command::CommandBuffer,
+    ) -> Result<()> {
         println!("Running render system");
         Ok(())
     }
@@ -92,7 +104,7 @@ fn main() -> Result<()> {
     let mut world = World::new();
 
     // Spawn entities
-    let entity1 = world.spawn((
+    let entity1 = world.spawn_entity((
         Position { x: 0.0, y: 0.0 },
         Velocity { x: 1.0, y: 0.5 },
         Health {
@@ -101,7 +113,7 @@ fn main() -> Result<()> {
         },
     ));
 
-    let entity2 = world.spawn((
+    let entity2 = world.spawn_entity((
         Position { x: 10.0, y: 5.0 },
         Velocity { x: -0.5, y: 1.0 },
         Health {
@@ -129,7 +141,7 @@ fn main() -> Result<()> {
     println!("Executing 3 frames:\n");
     for frame in 0..3 {
         println!("Frame {}", frame);
-        executor.execute_frame(&mut world)?;
+        executor.execute_frame_parallel(&mut world)?;
         println!();
     }
 

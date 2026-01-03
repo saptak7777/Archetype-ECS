@@ -3,6 +3,9 @@
 use archetype_ecs::World;
 use std::{fs::File, time::Instant};
 
+#[cfg(feature = "profiling")]
+use tracing_subscriber::{self, prelude::*};
+
 #[derive(Debug, Clone)]
 struct Position(f32, f32, f32);
 
@@ -11,6 +14,22 @@ struct Velocity(f32, f32, f32);
 
 #[derive(Debug, Clone)]
 struct Health(u32);
+
+#[cfg(feature = "profiling")]
+#[tracing::instrument(skip(world))]
+fn profile_spawns(world: &mut World, count: usize) {
+    let _span = tracing::info_span!("spawn_loop", count = count).entered();
+    for i in 0..count {
+        if i % 1_000 == 0 {
+            tracing::info!("Spawning entity {}/{}", i, count);
+        }
+        world.spawn_entity((
+            Position(1.0, 2.0, 3.0),
+            Velocity(1.0, 0.0, 0.0),
+            Health(100),
+        ));
+    }
+}
 
 #[cfg(feature = "profiling")]
 fn main() {
@@ -23,33 +42,20 @@ fn main() {
         .with_max_level(tracing::Level::TRACE)
         .init();
 
-    // Run spawn benchmarks with tracing
     let mut world = World::new();
 
-    // Warm up
     println!("Warming up...");
-    for _ in 0..1000 {
-        world
-            .spawn((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)))
-            .unwrap();
+    {
+        let _span = tracing::info_span!("warmup").entered();
+        for _ in 0..1000 {
+            world.spawn_entity((Position(1.0, 2.0, 3.0), Velocity(1.0, 0.0, 0.0)));
+        }
     }
 
-    // Profile spawn with 3 components
     println!("Profiling spawn with 3 components...");
     let start = Instant::now();
-    for i in 0..10_000 {
-        if i % 1_000 == 0 {
-            println!("Spawning entity {}/10,000", i);
-        }
-        world
-            .spawn((
-                Position(1.0, 2.0, 3.0),
-                Velocity(1.0, 0.0, 0.0),
-                Health(100),
-            ))
-            .unwrap();
-    }
-    println!("Spawn 10k entities: {:?}", start.elapsed());
+    profile_spawns(&mut world, 10_000);
+    println!("Spawn 10k entities complete in: {:?}", start.elapsed());
 }
 
 #[cfg(not(feature = "profiling"))]

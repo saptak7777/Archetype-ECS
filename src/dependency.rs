@@ -1,5 +1,6 @@
+use crate::bitset::BitSet;
 use crate::system::SystemAccess;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
 
 /// Represents execution stages where all systems in a stage can run in parallel
@@ -13,68 +14,86 @@ pub struct ExecutionStage {
 pub struct DependencyGraph {
     stages: Vec<ExecutionStage>,
     critical_path: Vec<usize>,
-    #[allow(dead_code)] // Used for future graph analysis features
-    adjacency_list: FxHashMap<usize, Vec<usize>>,
+    // Optimization: Use BitSet matrix instead of HashMap for conflict lookup
+    // Row 'i' contains dependency bits for system 'i'.
+    // If bit 'j' is set in row 'i', then system 'i' depends on system 'j'.
+    #[allow(dead_code)] // Used for debugging/future analysis
+    dependency_matrix: Vec<BitSet>,
 }
 
 impl DependencyGraph {
     /// Create graph from system accesses with optimal scheduling
     pub fn new(system_accesses: Vec<SystemAccess>) -> Self {
-        let adjacency_list = Self::build_adjacency_list(&system_accesses);
-        let stages = Self::build_stages_topological(&system_accesses, &adjacency_list);
-        let critical_path = Self::find_critical_path(&stages, &adjacency_list);
+        let dependency_matrix = Self::build_dependency_matrix(&system_accesses);
+        let stages = Self::build_stages_topological(&system_accesses, &dependency_matrix);
+        let critical_path = Self::find_critical_path(&stages, &dependency_matrix);
 
         Self {
             stages,
             critical_path,
-            adjacency_list,
+            dependency_matrix,
         }
     }
 
-    /// Build adjacency list representing dependencies between systems
-    /// If system A must run before system B, then A -> B in the graph
-    fn build_adjacency_list(accesses: &[SystemAccess]) -> FxHashMap<usize, Vec<usize>> {
-        let mut graph = FxHashMap::default();
-
-        for i in 0..accesses.len() {
-            graph.insert(i, Vec::new());
-        }
+    /// Build bitset matrix representing dependencies between systems
+    fn build_dependency_matrix(accesses: &[SystemAccess]) -> Vec<BitSet> {
+        let count = accesses.len();
+        let mut matrix = vec![BitSet::with_capacity(count); count];
 
         // Build directed edges: if A conflicts with B and A comes first, A -> B
-        for i in 0..accesses.len() {
-            for j in (i + 1)..accesses.len() {
+        // Matrix[i] has bit j set if i depends on j?
+        // NOTE: In topological sort, "edges" usually mean "i depends on j".
+        // Use standard convention: Edge U -> V means U must happen before V.
+        // So graph[U] contains V.
+        // Or in adjacency list: list[U] contains V.
+
+        // Let's stick to the previous logic:
+        // "if A conflicts with B and A comes first, A -> B" (A must complete before B)
+        // So adjacency_list[A] contained B.
+        // Here: matrix[A] will have bit B set.
+
+        for i in 0..count {
+            for j in (i + 1)..count {
                 if accesses[i].conflicts_with(&accesses[j]) {
                     // System i must complete before system j can start
-                    graph.get_mut(&i).unwrap().push(j);
+                    // Edge i -> j
+                    matrix[i].set(j);
                 }
             }
         }
 
-        graph
+        matrix
     }
 
     /// Build execution stages using topological sort and graph coloring
-    /// This ensures optimal parallelization while respecting dependencies
     fn build_stages_topological(
         accesses: &[SystemAccess],
-        adjacency_list: &FxHashMap<usize, Vec<usize>>,
+        dependency_matrix: &[BitSet],
     ) -> Vec<ExecutionStage> {
-        if accesses.is_empty() {
+        let count = accesses.len();
+        if count == 0 {
             return vec![];
         }
 
-        // Calculate in-degree for each node (number of dependencies)
-        let mut in_degree = vec![0; accesses.len()];
-        for edges in adjacency_list.values() {
-            for &target in edges {
-                in_degree[target] += 1;
+        // Calculate in-degree for each node
+        let mut in_degree = vec![0; count];
+
+        // matrix[u] contains v implies edge u -> v
+        // So v has an incoming edge from u.
+        for matrix_row in dependency_matrix.iter() {
+            for neighbor in matrix_row.ones() {
+                in_degree[neighbor] += 1;
             }
         }
 
         // Track depth of each system in the dependency graph
-        let mut depths = vec![0; accesses.len()];
+        let mut depths = vec![0; count];
         let mut queue = VecDeque::new();
 
+        // Start with systems that have no dependencies (no incoming edges? wait)
+        // In task scheduling:
+        // A -> B means A must finish before B starts.
+        // So A can start immediately (in-degree 0).
         // Start with systems that have no dependencies
         for (idx, &degree) in in_degree.iter().enumerate() {
             if degree == 0 {
@@ -83,18 +102,17 @@ impl DependencyGraph {
         }
 
         // Topological sort with depth tracking (Kahn's algorithm)
-        let mut sorted = Vec::with_capacity(accesses.len());
+        let mut sorted = Vec::with_capacity(count);
         while let Some(node) = queue.pop_front() {
             sorted.push(node);
 
-            if let Some(neighbors) = adjacency_list.get(&node) {
-                for &neighbor in neighbors {
-                    in_degree[neighbor] -= 1;
-                    depths[neighbor] = depths[neighbor].max(depths[node] + 1);
+            // Visit neighbors (systems that depend on 'node')
+            for neighbor in dependency_matrix[node].ones() {
+                in_degree[neighbor] -= 1;
+                depths[neighbor] = depths[neighbor].max(depths[node] + 1);
 
-                    if in_degree[neighbor] == 0 {
-                        queue.push_back(neighbor);
-                    }
+                if in_degree[neighbor] == 0 {
+                    queue.push_back(neighbor);
                 }
             }
         }
@@ -108,8 +126,7 @@ impl DependencyGraph {
 
             for &sys_idx in &sorted {
                 if depths[sys_idx] == depth {
-                    // Check if this system can be added to current stage
-                    // (doesn't conflict with any system already in stage)
+                    // Check conflicts within the stage
                     let mut can_add = true;
                     for &existing_idx in &stage_systems {
                         if accesses[sys_idx].conflicts_with(&accesses[existing_idx]) {
@@ -132,14 +149,12 @@ impl DependencyGraph {
             }
         }
 
-        // Optimize stages using graph coloring for systems that couldn't fit
+        // Optimize stages
         Self::optimize_stages(&mut stages, accesses, &sorted, &depths);
 
         stages
     }
 
-    /// Optimize stage assignment using graph coloring
-    /// Systems that couldn't fit in their depth level are assigned to later stages
     fn optimize_stages(
         stages: &mut Vec<ExecutionStage>,
         accesses: &[SystemAccess],
@@ -204,11 +219,8 @@ impl DependencyGraph {
         }
     }
 
-    /// Find the critical path (longest dependency chain) for priority scheduling
-    fn find_critical_path(
-        stages: &[ExecutionStage],
-        adjacency_list: &FxHashMap<usize, Vec<usize>>,
-    ) -> Vec<usize> {
+    /// Find the critical path (longest dependency chain)
+    fn find_critical_path(stages: &[ExecutionStage], dependency_matrix: &[BitSet]) -> Vec<usize> {
         if stages.is_empty() {
             return vec![];
         }
@@ -230,17 +242,26 @@ impl DependencyGraph {
         let mut path = vec![max_depth_system];
         let mut current = max_depth_system;
 
-        // Build reverse adjacency list
-        let mut reverse_adj: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-        for (&from, targets) in adjacency_list {
-            for &to in targets {
-                reverse_adj.entry(to).or_default().push(from);
-            }
-        }
-
         // Trace back through dependencies
-        while let Some(predecessors) = reverse_adj.get(&current) {
-            if let Some(&pred) = predecessors.first() {
+        // We need incoming edges (Reverse Adjacency).
+        // dependency_matrix[u] has bit v set if u -> v.
+        // We need X -> current. So dependency_matrix[X] has current set.
+        loop {
+            let mut predecessor = None;
+            // Iterate all systems to find one that points to `current`
+            // optimization: only look at systems in lower depths?
+            // For now, linear scan is acceptable for simple critical path finding
+            // especially since BitSet check is fast.
+            for (i, matrix_row) in dependency_matrix.iter().enumerate() {
+                if matrix_row.contains(current) {
+                    predecessor = Some(i);
+                    // Heuristic: take the first found predecessor (simplification)
+                    // Ideally we take the one with max depth-1
+                    break;
+                }
+            }
+
+            if let Some(pred) = predecessor {
                 path.push(pred);
                 current = pred;
             } else {
@@ -262,7 +283,7 @@ impl DependencyGraph {
         self.stages.len()
     }
 
-    /// Get critical path (systems on longest dependency chain)
+    /// Get critical path
     pub fn critical_path(&self) -> &[usize] {
         &self.critical_path
     }
@@ -300,16 +321,16 @@ impl DependencyGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::any::TypeId;
+    use crate::system::ComponentId;
 
     #[test]
     fn test_no_conflicts_parallel() {
         let access1 = SystemAccess {
-            reads: vec![TypeId::of::<i32>()],
+            reads: vec![ComponentId::of::<i32>()],
             writes: vec![],
         };
         let access2 = SystemAccess {
-            reads: vec![TypeId::of::<f32>()],
+            reads: vec![ComponentId::of::<f32>()],
             writes: vec![],
         };
 
@@ -320,11 +341,11 @@ mod tests {
     #[test]
     fn test_write_conflict_sequential() {
         let access1 = SystemAccess {
-            reads: vec![TypeId::of::<i32>()],
-            writes: vec![TypeId::of::<f32>()],
+            reads: vec![ComponentId::of::<i32>()],
+            writes: vec![ComponentId::of::<f32>()],
         };
         let access2 = SystemAccess {
-            reads: vec![TypeId::of::<f32>()],
+            reads: vec![ComponentId::of::<f32>()],
             writes: vec![],
         };
 
@@ -337,21 +358,21 @@ mod tests {
         // Create a chain: A -> B -> C
         let access_a = SystemAccess {
             reads: vec![],
-            writes: vec![TypeId::of::<i32>()],
+            writes: vec![ComponentId::of::<i32>()],
         };
         let access_b = SystemAccess {
-            reads: vec![TypeId::of::<i32>()],
-            writes: vec![TypeId::of::<f32>()],
+            reads: vec![ComponentId::of::<i32>()],
+            writes: vec![ComponentId::of::<f32>()],
         };
         let access_c = SystemAccess {
-            reads: vec![TypeId::of::<f32>()],
+            reads: vec![ComponentId::of::<f32>()],
             writes: vec![],
         };
 
         let graph = DependencyGraph::new(vec![access_a, access_b, access_c]);
 
-        // All systems should be on critical path
-        assert!(graph.is_critical(0) || graph.is_critical(1) || graph.is_critical(2));
+        // All systems should be on critical path (approximate check given Bitset implementation)
+        assert!(!graph.critical_path.is_empty());
         assert_eq!(graph.stage_count(), 3, "Should have 3 sequential stages");
     }
 
@@ -366,22 +387,22 @@ mod tests {
         let accesses = vec![
             SystemAccess {
                 reads: vec![],
-                writes: vec![TypeId::of::<i32>()],
+                writes: vec![ComponentId::of::<i32>()],
             },
             SystemAccess {
                 reads: vec![],
-                writes: vec![TypeId::of::<f32>()],
+                writes: vec![ComponentId::of::<f32>()],
             },
             SystemAccess {
-                reads: vec![TypeId::of::<i32>()],
-                writes: vec![TypeId::of::<i64>()],
+                reads: vec![ComponentId::of::<i32>()],
+                writes: vec![ComponentId::of::<i64>()],
             },
             SystemAccess {
-                reads: vec![TypeId::of::<f32>()],
-                writes: vec![TypeId::of::<f64>()],
+                reads: vec![ComponentId::of::<f32>()],
+                writes: vec![ComponentId::of::<f64>()],
             },
             SystemAccess {
-                reads: vec![TypeId::of::<i64>(), TypeId::of::<f64>()],
+                reads: vec![ComponentId::of::<i64>(), ComponentId::of::<f64>()],
                 writes: vec![],
             },
         ];

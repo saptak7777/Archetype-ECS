@@ -4,7 +4,6 @@ use crate::hierarchy::{Children, Parent};
 use crate::system::{System, SystemAccess};
 use crate::transform::{GlobalTransform, LocalTransform};
 use crate::world::World;
-use std::any::TypeId;
 
 /// System that updates global transforms based on hierarchy
 pub struct HierarchyUpdateSystem;
@@ -37,16 +36,28 @@ impl System for HierarchyUpdateSystem {
         "HierarchyUpdateSystem"
     }
 
-    fn access(&self) -> SystemAccess {
+    fn accesses(&self) -> SystemAccess {
         let mut access = SystemAccess::empty();
-        access.reads.push(TypeId::of::<LocalTransform>());
-        access.reads.push(TypeId::of::<Parent>());
-        access.reads.push(TypeId::of::<Children>());
-        access.writes.push(TypeId::of::<GlobalTransform>());
+        access
+            .reads
+            .push(crate::system::ComponentId::of::<LocalTransform>());
+        access
+            .reads
+            .push(crate::system::ComponentId::of::<Parent>());
+        access
+            .reads
+            .push(crate::system::ComponentId::of::<Children>());
+        access
+            .writes
+            .push(crate::system::ComponentId::of::<GlobalTransform>());
         access
     }
 
-    fn run(&mut self, world: &mut World) -> Result<()> {
+    fn run(
+        &mut self,
+        world: &mut World,
+        _commands: &mut crate::command::CommandBuffer,
+    ) -> Result<()> {
         // Strategy:
         // 1. Find all "roots" (Entities with LocalTransform but NO Parent)
         // 2. Recursively calculate GlobalTransform from top down
@@ -241,7 +252,7 @@ mod tests {
     #[test]
     fn test_hierarchy_system_access() {
         let system = HierarchyUpdateSystem::new();
-        let access = system.access();
+        let access = system.accesses();
 
         // Should read LocalTransform, Parent, Children
         assert_eq!(access.reads.len(), 3);
@@ -288,7 +299,8 @@ mod tests {
         HierarchyBuilder::attach(&mut world, parent, child).unwrap();
 
         let mut system = HierarchyUpdateSystem::new();
-        system.run(&mut world).unwrap();
+        let mut commands = crate::command::CommandBuffer::new();
+        system.run(&mut world, &mut commands).unwrap();
 
         let child_global = world.get_component::<GlobalTransform>(child).unwrap();
         // Parent (10,0,0) + Child (5,0,0) = (15,0,0)

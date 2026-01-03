@@ -1,6 +1,6 @@
 use crate::error::Result;
 use std::any::{Any, TypeId};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 /// Trait for any event type in the global event bus
 pub trait Event: Send + Sync + 'static {
@@ -13,6 +13,11 @@ pub trait Event: Send + Sync + 'static {
     /// Event name for debugging
     fn event_name(&self) -> &str {
         "UnnamedEvent"
+    }
+
+    /// Validate event data (e.g. non-negative damage)
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -32,32 +37,58 @@ pub trait EventSubscriber: Send + Sync {
     }
 }
 
+/// Trait representing a type-erased event queue
+trait EventStorage: Any + Send + Sync {
+    #[allow(dead_code)]
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn process(&mut self, subscribers: &mut [Box<dyn EventSubscriber>]) -> Result<()>;
+    fn clear(&mut self);
+    fn len(&self) -> usize;
+}
+
+/// Contiguous storage for events of a specific type
+struct TypedEventQueue<T: Event> {
+    events: Vec<T>,
+}
+
+impl<T: Event> EventStorage for TypedEventQueue<T> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn process(&mut self, subscribers: &mut [Box<dyn EventSubscriber>]) -> Result<()> {
+        for event in &self.events {
+            for subscriber in subscribers.iter_mut() {
+                subscriber.on_event(event)?;
+            }
+        }
+        Ok(())
+    }
+    fn clear(&mut self) {
+        self.events.clear();
+    }
+    fn len(&self) -> usize {
+        self.events.len()
+    }
+}
+
 /// Central event bus for pub/sub communication
 pub struct EventBus {
+    queues: HashMap<TypeId, Box<dyn EventStorage>>,
     subscribers: HashMap<TypeId, Vec<Box<dyn EventSubscriber>>>,
-    event_queue: VecDeque<Box<dyn Event>>,
-    max_queue_size: usize,
-    processed_events: u64,
+    processed_count: u64,
 }
 
 impl EventBus {
     /// Create new event bus
     pub fn new() -> Self {
         Self {
+            queues: HashMap::new(),
             subscribers: HashMap::new(),
-            event_queue: VecDeque::new(),
-            max_queue_size: 10000,
-            processed_events: 0,
-        }
-    }
-
-    /// Create with custom max queue size
-    pub fn with_capacity(max_size: usize) -> Self {
-        Self {
-            subscribers: HashMap::new(),
-            event_queue: VecDeque::with_capacity(max_size),
-            max_queue_size: max_size,
-            processed_events: 0,
+            processed_count: 0,
         }
     }
 
@@ -71,50 +102,48 @@ impl EventBus {
     }
 
     /// Subscribe to all event types (catches everything)
+    /// Note: This is now slightly more expensive as it requires bridging
     pub fn subscribe_all(&mut self, subscriber: Box<dyn EventSubscriber>) {
-        let type_id = TypeId::of::<()>(); // Use unit type as wildcard
+        let type_id = TypeId::of::<()>(); // Wildcard
         self.subscribers
             .entry(type_id)
             .or_default()
             .push(subscriber);
     }
 
-    /// Publish event to queue
-    pub fn publish(&mut self, event: Box<dyn Event>) -> Result<()> {
-        if self.event_queue.len() < self.max_queue_size {
-            self.event_queue.push_back(event);
-            Ok(())
-        } else {
-            Err(crate::error::EcsError::EventQueueOverflow)
-        }
-    }
-
-    /// Publish concrete event (convenience)
+    /// Publish concrete event (Zero-Allocation!)
     pub fn publish_event<E: Event + 'static>(&mut self, event: E) -> Result<()> {
-        self.publish(Box::new(event))
+        let type_id = TypeId::of::<E>();
+        let queue = self
+            .queues
+            .entry(type_id)
+            .or_insert_with(|| Box::new(TypedEventQueue::<E> { events: Vec::new() }));
+
+        let typed_queue = queue
+            .as_any_mut()
+            .downcast_mut::<TypedEventQueue<E>>()
+            .unwrap();
+        typed_queue.events.push(event);
+        Ok(())
     }
 
     /// Process all queued events
     pub fn process_events(&mut self) -> Result<()> {
-        while let Some(event) = self.event_queue.pop_front() {
-            let event_type = event.event_type_id();
+        let wildcard_type = TypeId::of::<()>();
 
-            // Get subscribers for this event type
-            if let Some(subs) = self.subscribers.get_mut(&event_type) {
-                for subscriber in subs.iter_mut() {
-                    subscriber.on_event(event.as_ref())?;
-                }
+        for (type_id, queue) in self.queues.iter_mut() {
+            // 1. Process specific subscribers
+            if let Some(subs) = self.subscribers.get_mut(type_id) {
+                queue.process(subs)?;
             }
 
-            // Also notify wildcard subscribers
-            let wildcard_type = TypeId::of::<()>();
+            // 2. Process wildcard subscribers
             if let Some(wildcard_subs) = self.subscribers.get_mut(&wildcard_type) {
-                for subscriber in wildcard_subs.iter_mut() {
-                    subscriber.on_event(event.as_ref())?;
-                }
+                queue.process(wildcard_subs)?;
             }
 
-            self.processed_events += 1;
+            self.processed_count += queue.len() as u64;
+            queue.clear();
         }
 
         Ok(())
@@ -122,17 +151,19 @@ impl EventBus {
 
     /// Get number of queued events
     pub fn queue_size(&self) -> usize {
-        self.event_queue.len()
+        self.queues.values().map(|q| q.len()).sum()
     }
 
     /// Get total processed events
     pub fn processed_count(&self) -> u64 {
-        self.processed_events
+        self.processed_count
     }
 
     /// Clear all queued events
     pub fn clear_queue(&mut self) {
-        self.event_queue.clear();
+        for queue in self.queues.values_mut() {
+            queue.clear();
+        }
     }
 
     /// Get subscriber count for event type
@@ -224,16 +255,5 @@ mod tests {
 
         assert_eq!(*count1.lock().unwrap(), 1);
         assert_eq!(*count2.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn test_queue_overflow() {
-        let mut bus = EventBus::with_capacity(2);
-
-        bus.publish_event(TestEvent).unwrap();
-        bus.publish_event(TestEvent).unwrap();
-
-        // Third publish should fail
-        assert!(bus.publish_event(TestEvent).is_err());
     }
 }

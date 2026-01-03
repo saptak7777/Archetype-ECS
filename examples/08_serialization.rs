@@ -1,20 +1,13 @@
 //! Serialization Example
-//! 
-//! This example demonstrates the serialization capabilities of the ECS:
-//! - JSON serialization and deserialization
-//! - Binary serialization
-//! - File save/load operations
-//! - Debug information export
+//!
+//! This example demonstrates the new Scene-based serialization system:
+//! - Component registration with SerializationRegistry
+//! - Scene creation and JSON export
+//! - Entity and component serialization
 
-use archetype_ecs::World;
-use serde::{Serialize, Deserialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlayerData {
-    name: String,
-    score: u32,
-    level: u8,
-}
+use archetype_ecs::prelude::*;
+use archetype_ecs::serialization::{save_world, Scene, SerializationRegistry};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Position {
@@ -23,28 +16,62 @@ struct Position {
     z: f32,
 }
 
+// Implement Reflect for Position
+impl archetype_ecs::reflection::Reflect for Position {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn apply(&mut self, value: &dyn archetype_ecs::reflection::Reflect) {
+        if let Some(v) = value.as_any().downcast_ref::<Position>() {
+            *self = v.clone();
+        }
+    }
+
+    fn reflect_clone(&self) -> Box<dyn archetype_ecs::reflection::Reflect> {
+        Box::new(self.clone())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Health {
     current: f32,
     max: f32,
 }
 
+impl archetype_ecs::reflection::Reflect for Health {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn apply(&mut self, value: &dyn archetype_ecs::reflection::Reflect) {
+        if let Some(v) = value.as_any().downcast_ref::<Health>() {
+            *self = v.clone();
+        }
+    }
+
+    fn reflect_clone(&self) -> Box<dyn archetype_ecs::reflection::Reflect> {
+        Box::new(self.clone())
+    }
+}
+
 fn main() {
-    println!("=== Serialization Example ===\n");
-    
+    println!("=== Archetype ECS Serialization Example ===\n");
+
     // Create world and spawn entities
     let mut world = World::new();
-    
-    println!("Creating entities with serializable components...");
-    
-    // Spawn player entities
+
+    println!("Creating entities...");
     for i in 0..5 {
-        world.spawn((
-            PlayerData {
-                name: format!("Player_{}", i + 1),
-                score: i * 100,
-                level: (i + 1) as u8,
-            },
+        world.spawn_entity((
             Position {
                 x: i as f32 * 10.0,
                 y: 0.0,
@@ -56,148 +83,48 @@ fn main() {
             },
         ));
     }
-    
-    // Spawn some NPC entities
-    for i in 0..10 {
-        world.spawn((
-            Position {
-                x: (i + 10) as f32,
-                y: 0.0,
-                z: (i + 10) as f32,
-            },
-            Health {
-                current: 50.0,
-                max: 50.0,
-            },
-        ));
-    }
-    
+
     println!("Created {} entities\n", world.entity_count());
-    
-    // Demonstrate JSON serialization
-    println!("=== JSON Serialization ===");
-    match world.serialize_json() {
-        Ok(json) => {
-            println!("Successfully serialized to JSON ({} bytes)", json.len());
-            println!("JSON preview: {}", &json[..json.len().min(100)]);
-            if json.len() > 100 {
-                println!("...");
-            }
-            
-            // Test deserialization
-            match World::deserialize_json(&json) {
-                Ok(restored_world) => {
-                    println!("✅ Successfully deserialized from JSON");
-                    println!("Restored world tick: {}", restored_world.tick);
+
+    // Create serialization registry and register component types
+    println!("=== Setting up Serialization Registry ===");
+    let mut registry = SerializationRegistry::new();
+    registry.register::<Position>();
+    registry.register::<Health>();
+    println!("✅ Registered Position and Health components\n");
+
+    // Save world to scene
+    println!("=== Saving World to Scene ===");
+    match save_world(&world, &registry) {
+        Ok(scene) => {
+            println!("✅ Successfully created scene");
+            println!("Scene contains {} entities", scene.entity_count());
+
+            // Serialize scene to JSON
+            match serde_json::to_string_pretty(&scene) {
+                Ok(json) => {
+                    println!("\n=== Scene JSON ===");
+                    println!("{}", json);
+
+                    // Save to file
+                    if let Err(e) = std::fs::write("scene.json", &json) {
+                        println!("\n❌ Failed to write scene to file: {}", e);
+                    } else {
+                        println!("\n✅ Saved scene to scene.json");
+                    }
                 }
                 Err(e) => {
-                    println!("❌ Failed to deserialize from JSON: {e:?}");
+                    println!("❌ Failed to serialize scene to JSON: {}", e);
                 }
             }
         }
         Err(e) => {
-            println!("❌ Failed to serialize to JSON: {e:?}");
+            println!("❌ Failed to save world: {:?}", e);
         }
     }
-    
-    // Demonstrate pretty JSON
-    println!("\n=== Pretty JSON ===");
-    match world.serialize_json_pretty() {
-        Ok(pretty_json) => {
-            println!("Successfully serialized to pretty JSON");
-            println!("Pretty JSON preview:\n{}", &pretty_json[..pretty_json.len().min(200)]);
-            if pretty_json.len() > 200 {
-                println!("...\n[truncated]");
-            }
-        }
-        Err(e) => {
-            println!("❌ Failed to serialize to pretty JSON: {e:?}");
-        }
-    }
-    
-    // Demonstrate binary serialization
-    println!("\n=== Binary Serialization ===");
-    match world.serialize_binary() {
-        Ok(binary_data) => {
-            println!("Successfully serialized to binary ({} bytes)", binary_data.len());
-            
-            // Test binary deserialization
-            match World::deserialize_binary(&binary_data) {
-                Ok(restored_world) => {
-                    println!("✅ Successfully deserialized from binary");
-                    println!("Restored world tick: {}", restored_world.tick);
-                }
-                Err(e) => {
-                    println!("❌ Failed to deserialize from binary: {e:?}");
-                }
-            }
-        }
-        Err(e) => {
-            println!("❌ Failed to serialize to binary: {e:?}");
-        }
-    }
-    
-    // Demonstrate file save/load
-    println!("\n=== File Save/Load ===");
-    match world.save_to_file("world_save.bin") {
-        Ok(_) => {
-            println!("✅ Successfully saved world to file");
-            
-            match World::load_from_file("world_save.bin") {
-                Ok(loaded_world) => {
-                    println!("✅ Successfully loaded world from file");
-                    println!("Loaded world tick: {}", loaded_world.tick);
-                }
-                Err(e) => {
-                    println!("❌ Failed to load world from file: {e:?}");
-                }
-            }
-        }
-        Err(e) => {
-            println!("❌ Failed to save world to file: {e:?}");
-        }
-    }
-    
-    // Demonstrate debug info export
-    println!("\n=== Debug Information Export ===");
-    match world.export_debug_info() {
-        Ok(debug_info) => {
-            println!("✅ Successfully exported debug information:");
-            println!("{debug_info}");
-        }
-        Err(e) => {
-            println!("❌ Failed to export debug info: {e:?}");
-        }
-    }
-    
-    // Demonstrate component serialization
-    println!("\n=== Component Serialization ===");
-    let player_data = PlayerData {
-        name: "TestPlayer".to_string(),
-        score: 1500,
-        level: 5,
-    };
-    
-    // Use bincode directly for component serialization
-    match bincode::serialize(&player_data) {
-        Ok(data) => {
-            println!("✅ Serialized component ({} bytes)", data.len());
-            
-            match bincode::deserialize::<PlayerData>(&data) {
-                Ok(restored_component) => {
-                    println!("✅ Deserialized component: {restored_component:?}");
-                }
-                Err(e) => {
-                    println!("❌ Failed to deserialize component: {e:?}");
-                }
-            }
-        }
-        Err(e) => {
-            println!("❌ Failed to serialize component: {e:?}");
-        }
-    }
-    
+
     println!("\n=== Serialization Example Complete ===");
-    println!("Note: Full entity serialization would require a component registry");
-    println!("for complete type introspection and restoration.");
+    println!("\nNote: Full entity deserialization requires additional infrastructure");
+    println!("for spawning entities from Box<dyn Reflect> components.");
+    println!("This is planned for future iterations.");
 }

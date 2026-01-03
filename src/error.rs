@@ -79,21 +79,30 @@ pub enum EcsError {
     /// Resource already exists (init_resource failed)
     ResourceAlreadyExists(std::any::TypeId),
 
+    /// Entity capacity exhausted
+    EntityCapacityExhausted,
+
+    /// Component registration failed
+    ComponentRegistrationFailed(std::any::TypeId),
+
     /// IO error (file operations, etc.)
     IoError(String),
 
     /// Spawn error with detailed context
     SpawnError(SpawnError),
+
+    /// Validation error for events or components
+    ValidationError(String),
+
+    /// Panic during hot-reload system execution
+    HotReloadPanic,
 }
 
 /// Detailed spawn error types
 #[derive(Debug, Clone)]
 pub enum SpawnError {
     /// Entity capacity exhausted
-    EntityCapacityExhausted {
-        attempted: usize,
-        capacity: usize,
-    },
+    EntityCapacityExhausted { attempted: usize, capacity: usize },
     /// Component registration failed
     ComponentRegistrationFailed(String),
     /// Archetype creation failed
@@ -106,14 +115,26 @@ pub enum SpawnError {
 impl fmt::Display for SpawnError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SpawnError::EntityCapacityExhausted { attempted, capacity } => {
-                write!(f, "Entity capacity exhausted: attempted to spawn {attempted}, max is {capacity}")
+            SpawnError::EntityCapacityExhausted {
+                attempted,
+                capacity,
+            } => {
+                write!(
+                    f,
+                    "Entity capacity exhausted: attempted to spawn {attempted}, max is {capacity}"
+                )
             }
             SpawnError::ComponentRegistrationFailed(reason) => {
                 write!(f, "Failed to register component: {reason}")
             }
-            SpawnError::ArchetypeCreationFailed { component_count, reason } => {
-                write!(f, "Failed to create archetype for {component_count} components: {reason}")
+            SpawnError::ArchetypeCreationFailed {
+                component_count,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "Failed to create archetype for {component_count} components: {reason}"
+                )
             }
         }
     }
@@ -141,9 +162,15 @@ impl fmt::Display for EcsError {
             EcsError::AssetNotFound(msg) => write!(f, "Asset not found: {msg}"),
             EcsError::BatchTooLarge => write!(f, "Batch size too large (max 10,000,000)"),
             EcsError::HierarchyError(msg) => write!(f, "Hierarchy error: {msg}"),
-            EcsError::ResourceAlreadyExists(type_id) => write!(f, "Resource already exists: {type_id:?}"),
+            EcsError::ResourceAlreadyExists(type_id) => {
+                write!(f, "Resource already exists: {type_id:?}")
+            }
+            EcsError::EntityCapacityExhausted => write!(f, "Entity capacity exhausted"),
+            EcsError::ComponentRegistrationFailed(_) => write!(f, "Component registration failed"),
             EcsError::IoError(msg) => write!(f, "IO error: {msg}"),
             EcsError::SpawnError(spawn_err) => write!(f, "Spawn error: {spawn_err}"),
+            EcsError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
+            EcsError::HotReloadPanic => write!(f, "Panic during hot-reload execution"),
         }
     }
 }

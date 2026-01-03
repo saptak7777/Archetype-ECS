@@ -13,7 +13,7 @@ mod tests {
         let mut world = World::new();
 
         // Spawn an entity
-        let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
+        let entity = world.spawn_entity((Position { x: 1.0, y: 2.0 },));
 
         // Verify it exists
         assert!(

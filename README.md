@@ -2,188 +2,198 @@
 
 **A high-performance, strictly-typed, archetype-based Entity Component System for Rust.**
 
-Archetype ECS differs from other Rust ECS libraries by focusing on a "pure" data-oriented design with zero "game engine" bloat. It provides a robust kernel for building complex simulations and game engines, offering industry-standard features like parallel iteration, reactive queries, and hierarchical transforms out of the box.
+Archetype ECS is what happens when you take ECS seriously, strip out the "game engine" bloat, and focus on raw performance. It's the ECS equivalent of a sports car - fast, focused, and doesn't come with cup holders.
 
-## features
+## What This Is (Probably)
 
-- **🚀 High Performance**: Cache-friendly archetype storage with SoA (Structure of Arrays) layout.
-- **⚡ Parallel Execution**: Automatic multi-threaded system scheduling with dependency resolution.
-- **🔍 Reactive Queries**: Efficient `Changed<T>`, `Added<T>`, and `Removed<T>` filters.
-- **🌳 Hierarchy System**: First-class parent-child relationship management with efficient transform propagation using `glam`.
-- **💾 Serialization**: Built-in JSON serialization for entities, components, and entire worlds.
-- **📦 Asset Management**: Typed asset handles, async-ready loaders, and hot-reloading support.
-- **🧩 Modularity**: Zero "engine" assumptions. Use it for rendering, physics, or data processing.
+Archetype ECS is a prototype ECS library for Rust game engines. It follows Unix philosophy (does one thing, hopefully well) and provides the ECS components you'd need to integrate into a larger engine.
 
-## Quick Start
+**Fair Warning**: This is a library component, not a complete solution. You'll need to bring your own rendering, materials, lighting, and scene management. Think of it as an engine block for your car - it works, but you can't drive it alone.
 
-Add to `Cargo.toml`:
+## Core Concepts
 
-```toml
-[dependencies]
-archetype_ecs = { git = "https://github.com/saptak7777/archetype_ecs" }
-glam = "0.25" # Recommended for math types
-```
+### What It Does
+✅ **High Performance**: Cache-friendly archetype storage with SoA (Structure of Arrays) layout
+✅ **Parallel Execution**: Automatic multi-threaded system scheduling with dependency resolution
+✅ **Reactive Queries**: Efficient `Changed<T>` and `Added<T>` filters for change detection
+✅ **Hierarchy System**: First-class parent-child relationships with transform propagation
+✅ **Serialization**: Built-in JSON serialization for entities, components, and worlds
+✅ **Hot Reload**: System hot-reloading for development workflow (Code)
+✅ **Profiling**: Integrated `tracing` instrumentation for performance analysis
+✅ **Error Types**: Asset loading error types for your asset manager
 
-### Basic Example
+### What It Doesn't Do
+❌ Rendering (but works perfectly with ash_renderer)
+❌ Physics (but integrates seamlessly with particle_accelerator)
+❌ Asset Management (we intentionally separate data from logic)
+❌ Materials/Lighting (that's your renderer's job)
 
+---
+
+## Integration Examples
+
+### With particle_accelerator (Physics)
 ```rust
 use archetype_ecs::prelude::*;
-use glam::{Vec3, Quat};
+use particle_accelerator::{PhysicsWorld, RigidBody, Collider};
 
-// 1. Define Components
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct Velocity {
-    pub value: Vec3,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct Player {
-    pub name: &'static str,
-}
-
-// 2. Define a System
-struct MovementSystem;
-
-impl System for MovementSystem {
-    fn name(&self) -> &'static str { "Movement" }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess::new()
-            .read::<Velocity>()
-            .write::<LocalTransform>()
-    }
-
-    fn run(&mut self, world: &mut World) -> Result<()> {
-        // Query for entities with Velocity and LocalTransform
-        // We use query_mut to modify the transform
-        for (vel, transform) in world.query_mut::<(&Velocity, &mut LocalTransform)>() {
-            transform.position += vel.value * 0.016; // Assume 60 FPS dt
-        }
-        Ok(())
-    }
-}
-
-fn main() -> Result<()> {
+fn setup_physics_world() -> Result<()> {
     let mut world = World::new();
-
-    // 3. Spawn Entities
-    // We use standard glam types for positions
-    let player_id = world.spawn((
-        Player { name: "Hero" },
-        LocalTransform::with_position(Vec3::new(0.0, 1.0, 0.0)),
-        GlobalTransform::identity(), // Required for hierarchy participation
-        Velocity { value: Vec3::new(1.0, 0.0, 1.0) },
+    let mut physics = PhysicsWorld::new();
+    
+    // Spawn physics entities
+    let ball = world.spawn_entity((
+        Position { x: 0.0, y: 10.0, z: 0.0 },
+        Velocity { x: 5.0, y: 0.0, z: 0.0 },
+        RigidBody::dynamic(),
+        Collider::sphere(1.0),
     ));
-
-    // 4. Run Systems
-    let mut movement = MovementSystem;
-    movement.run(&mut world)?;
-
-    // 5. Verify Result
-    let player_pos = world.get_component::<GlobalTransform>(player_id).unwrap().position;
-    println!("Player is now at: {}", player_pos);
-
+    
+    // Physics system integration
+    physics.update(&mut world, 0.016)?;
+    
     Ok(())
 }
 ```
 
-## Core Concepts
-
-### World & Archetypes
-Data is stored in **Archetypes**, grouping entities with the precise same set of components together. This guarantees contiguous memory for iteration, minimizing cache misses.
-
+### With archetype_assets (Asset Management)
 ```rust
-// Entities are just IDs.
-let entity = world.spawn((ComponentA, ComponentB));
-```
+use archetype_ecs::prelude::*;
+use archetype_assets::{AssetManager, Handle};
 
-### Queries & Filters
-Queries are cached for O(1) access after the first run.
-
-```rust
-// Basic iteration
-for (pos, vel) in world.query::<(&Position, &Velocity)>() { ... }
-
-// Mutable iteration
-for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() { ... }
-
-// Change detection (Reactive)
-for pos in world.query::<&Position, Changed<Position>>() {
-    println!("Position changed: {:?}", pos);
+fn setup_assets() -> Result<()> {
+    let mut world = World::new();
+    let mut assets = AssetManager::new();
+    
+    // Load assets
+    let texture_handle = assets.load::<Texture>("player.png")?;
+    let mesh_handle = assets.load::<Mesh>("player.obj")?;
+    
+    // Store asset manager in world
+    world.insert_resource(assets);
+    
+    // Spawn entity with asset handles
+    let player = world.spawn_entity((
+        Position::default(),
+        MeshComponent { handle: mesh_handle },
+        TextureComponent { handle: texture_handle },
+    ));
+    
+    Ok(())
 }
 ```
 
-### Hierarchy & Transforms
-The `hierarchy` module provides optimized component-based scene graphs.
+## Quick Start
 
-```rust
-let parent = world.spawn((LocalTransform::identity(), GlobalTransform::identity()));
-let child = world.spawn((LocalTransform::identity(), GlobalTransform::identity()));
-
-// Attach child to parent
-world.attach(parent, child)?;
-
-// HierarchyUpdateSystem will automatically propagate transforms
+### Installation
+```toml
+[dependencies]
+archetype_ecs = "1.2.0"
+glam = "0.30"            # Required for transform types
 ```
 
-### Resources
-Resources are typed singletons for global state (e.g., time, config, window handles).
+### 1. Basic ECS Usage (The Foundation)
+```rust
+use archetype_ecs::prelude::*;
+
+fn main() -> Result<()> {
+    let mut world = World::new();
+    
+    // Spawn some entities
+    let player = world.spawn_entity((
+        Position { x: 0.0, y: 0.0 },
+        Velocity { x: 1.0, y: 0.0 },
+    ));
+    
+    // Query and update
+    for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
+        pos.x += vel.x;
+        pos.y += vel.y;
+    }
+    
+    Ok(())
+}
+```
+
+### 2. Systems & Hot Reloading (The Real Deal)
+We support hot-reloading of systems using the `hot_reload` module. This allows you to iterate on game logic without restarting the application.
 
 ```rust
-// Insert resource
-world.insert_resource(Time { delta: 0.016 });
+use archetype_ecs::prelude::*;
 
-// Get resource
-let time = world.resource::<Time>().unwrap();
+struct MovementSystem;
 
-// Lazy initialization (inserts if missing)
-let time = world.get_or_insert_with(|| Time::default());
-
-// Init-only (errors if exists - prevents accidental overwrites)
-world.init_resource(Config::new())?;
-
-// Systems can declare resource dependencies
-impl System for MySystem {
+impl System for MovementSystem {
+    fn name(&self) -> &'static str { "Movement" }
+    
     fn access(&self) -> SystemAccess {
         SystemAccess::new()
             .read::<Velocity>()
-            .resource::<Time>()  // Tracks resource access
+            .write::<Position>()
+    }
+    
+    fn run(&mut self, world: &mut World) -> Result<()> {
+        for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
+            pos.x += vel.x * 0.016; // 60 FPS dt
+        }
+        Ok(())
     }
 }
 ```
 
-### Parallel Systems
-The `ParallelExecutor` distributes systems across a thread pool, ensuring thread safety via runtime borrow checking.
-
-```rust
-let mut executor = ParallelExecutor::new(vec![
-    Box::new(PhysicsSystem),
-    Box::new(RenderSystem),
-    Box::new(AudioSystem),
-]);
-
-// Automatically runs independent systems in parallel
-executor.execute_parallel(&mut world)?;
-```
-
 ## Performance
 
-Archetype ECS is designed for speed.
-- **Iteration**: Linear memory access pattern allows efficient prefetching.
+Archetype ECS is designed for speed because slow ECS libraries are sad ECS libraries.
+- **Iteration**: Linear memory access pattern allows efficient prefetching. Your CPU will thank you.
 - **Change Detection**: Bitset-based filtering makes reactive systems negligible in cost.
-- **Fragmentation**: Archetype moves are somewhat expensive, so distinct "States" (like `Walking` vs `Flying` components) should be used judiciously.
+- **Fragmentation**: Archetype moves can be expensive; we recommend using distinct components for distinct states (e.g. `Walking` vs `Flying`).
 
 *(Benchmarks running on Intel Core i5-11400f, 100k entities)*
-- **Simple Iteration**: ~0.5ns / entity
-- **Composed Query**: ~1.2ns / entity
-- **Parallel Dispatch**: Scales linearly with cores for disjoint data.
+- **Simple Iteration**: ~1-2ns / entity (very fast)
+- **Composed Query**: ~2-3ns / entity (still fast)
+- **Parallel Dispatch**: Scales linearly with cores for disjoint data
 
-## Standard Compliance
+## Known Limitations (Being Honest)
 
-- **Math**: Uses [`glam`](https://crates.io/crates/glam) for SIMD-accelerated linear algebra.
-- **Serialization**: Uses [`serde`](https://crates.io/crates/serde) for universal IO.
-- **Async**: Compatible with standard async runtimes for non-ECS tasks (like asset loading).
+### What We Don't Do (Because We're Focused)
+- ❌ Rendering (use ash_renderer, wgpu, or your own solution)
+- ❌ Materials/Lighting (that's your engine's job, not ours)
+- ❌ Asset loading (we provide error types, you bring the loader; see `archetype_assets`)
+- ❌ Code generation (we prefer explicit typed code over macro magic)
+
+### Current Limitations
+- **Archetype Moves**: Adding/removing components moves entities between arrays. This is O(N) for the components being moved.
+- **No Built-in Networking**: We focus on single-machine performance.
+- **Serialization**: JSON support is MVP. Binary serialization is planned.
+
+## Troubleshooting
+
+### "My entities aren't spawning!"
+Check:
+- Are you using `spawn_entity()` instead of the deprecated `spawn()`?
+- Did you remember to import the prelude?
+- Is your Bundle implementation correct?
+
+### "My queries aren't finding anything!"
+Check:
+- Did you actually spawn entities with those components?
+- Are you using the right query type (`query` vs `query_mut`)?
+- Did you despawn the entities and forget to flush removals?
+
+## Contributing
+
+Contributions are welcome. I appreciate:
+- Clean code (clippy is your friend)
+- Performance justifications ("It's faster" -> Show me the benchmark)
+- Honest PR descriptions
 
 ## License
 
-Apache-2.0.
+Apache-2.0. Because nobody likes monsters.
+
+## Acknowledgments
+
+This library wouldn't exist without:
+- The Rust gamedev community (for putting up with ECS experimentation)
+- glam (for making math not painful)
+- serde (for making serialization not a nightmare)

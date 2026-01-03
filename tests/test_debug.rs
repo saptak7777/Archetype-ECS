@@ -1,10 +1,10 @@
 // Quick test to isolate the add_component issue
-use archetype_ecs::{World, LocalTransform, Parent};
+use archetype_ecs::{LocalTransform, Parent, World};
 
 #[test]
 fn test_add_component_simple() {
     let mut world = World::new();
-    let entity = world.spawn((LocalTransform::identity(),));
+    let entity = world.spawn_entity((LocalTransform::identity(),));
 
     // This should work - adding a new component
     let result = world.add_component(entity, Parent::new(entity));
