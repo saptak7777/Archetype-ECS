@@ -61,3 +61,5 @@ config.local.toml
 # AI Notes and Rules
 Advanced Human to AI .md
 rule code .md
+
+.txt
