@@ -58,6 +58,10 @@ lcov.info
 .env.local
 config.local.toml
 
+# Exclude all markdown files except README
+*.md
+!README.md
+
 # AI Notes and Rules
 Advanced Human to AI .md
 rule code .md
